@@ -60,7 +60,6 @@ cursor.execute(
 """
 )
 
-# Проверим, есть ли колонка homework в старой таблице (на случай миграции)
 cursor.execute("PRAGMA table_info(students)")
 columns = [col[1] for col in cursor.fetchall()]
 if "homework" not in columns:
@@ -83,7 +82,6 @@ conn.commit()
 st.title("📚 Журнал посещаемости репетитора")
 
 
-# Функция для извлечения только цифры из класса (например, из "4б" -> "4")
 def extract_grade_num(grade_str):
   if not grade_str or grade_str == "-":
     return ""
@@ -91,11 +89,10 @@ def extract_grade_num(grade_str):
   return match.group(0) if match else grade_str
 
 
-# Загружаем всех учеников из базы
 cursor.execute("SELECT id, name, surname, grade, homework FROM students")
 all_students = cursor.fetchall()
 
-# --- Боковая панель: Управление учениками (Все поля обязательны, класс может быть "-") ---
+# --- Боковая панель: Управление учениками (Все поля обязательны) ---
 st.sidebar.header("Управление учениками")
 
 with st.sidebar.form("add_student_form", clear_on_submit=True):
@@ -126,14 +123,12 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
           " '-')"
       )
 
-# Словарь учеников
 all_student_dict = {}
 for sid, name, surname, grade, hw in all_students:
   grade_str = f" ({grade})" if grade and grade != "-" else ""
   display_name = f"{surname} {name}{grade_str}"
   all_student_dict[display_name] = sid
 
-# --- Легенда в боковой панели ---
 st.sidebar.divider()
 st.sidebar.markdown("""
 ### 📌 Подсказка (Легенда)
@@ -142,7 +137,7 @@ st.sidebar.markdown("""
 * 🔴 — Несвоевременно отменил
 """)
 
-# --- Экран: Фильтры (период дат: текущая неделя ПН-ВС) ---
+# --- Экран: Фильтры ---
 st.header("Электронный журнал")
 
 today = date.today()
@@ -174,7 +169,6 @@ with f_col3:
 st.divider()
 
 
-# Вспомогательные функции конвертации
 def status_to_emoji(stat):
   if stat == "Присутствовал":
     return "🟢"
@@ -273,8 +267,8 @@ if all_student_dict and start_date <= end_date:
     }
 
     st.markdown(
-        "💡 *Изменения в ячейках сохраняются автоматически. Нажмите на имя"
-        " ученика в списке ниже, чтобы открыть его карточку.*"
+        "💡 *Изменения в ячейках сохраняются автоматически. Нажмите на любуую"
+        " ячейку в строке ученика, чтобы открыть его карточку.*"
     )
 
 
@@ -282,84 +276,97 @@ if all_student_dict and start_date <= end_date:
       edited_data = st.session_state["grid_editor"]
       current_indices = list(df.index)
 
-      for row_idx_str, changes in edited_data["edited_rows"].items():
-        row_idx = int(row_idx_str)
-        full_name = current_indices[row_idx]
+      if "edited_rows" in edited_data:
+        for row_idx_str, changes in edited_data["edited_rows"].items():
+          row_idx = int(row_idx_str)
+          full_name = current_indices[row_idx]
 
-        target_sid = None
-        for sid, name, surname, grade, hw in all_students:
-          fn = f"{surname} {name}" + (
-              f" [{grade}]" if grade and grade != "-" else ""
-          )
-          if fn == full_name:
-            target_sid = sid
-            break
+          target_sid = None
+          for sid, name, surname, grade, hw in all_students:
+            fn = f"{surname} {name}" + (
+                f" [{grade}]" if grade and grade != "-" else ""
+            )
+            if fn == full_name:
+              target_sid = sid
+              break
 
-        if target_sid:
-          for col_name, selected_emoji in changes.items():
-            real_date = None
-            if (
-                full_name in table_data
-                and col_name in table_data[full_name]
-            ):
-              real_date = table_data[full_name][col_name]["db_date"]
+          if target_sid:
+            for col_name, selected_emoji in changes.items():
+              real_date = None
+              if (
+                  full_name in table_data
+                  and col_name in table_data[full_name]
+              ):
+                real_date = table_data[full_name][col_name]["db_date"]
 
-            if real_date:
-              real_status = emoji_to_status(selected_emoji)
+              if real_date:
+                real_status = emoji_to_status(selected_emoji)
 
-              if real_status:
-                cursor.execute(
-                    """
-                                        INSERT INTO attendance (student_id, date, status) VALUES (?, ?, ?)
-                                        ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status
-                                    """,
-                    (target_sid, real_date, real_status),
-                )
-              else:
-                cursor.execute(
-                    "DELETE FROM attendance WHERE student_id = ? AND date = ?",
-                    (target_sid, real_date),
-                )
-      conn.commit()
+                if real_status:
+                  cursor.execute(
+                      """
+                                            INSERT INTO attendance (student_id, date, status) VALUES (?, ?, ?)
+                                            ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status
+                                        """,
+                      (target_sid, real_date, real_status),
+                  )
+                else:
+                  cursor.execute(
+                      "DELETE FROM attendance WHERE student_id = ? AND date = ?",
+                      (target_sid, real_date),
+                  )
+        conn.commit()
 
 
-    st.data_editor(
+    # Таблица с поддержкой кликов по ячейкам/строкам
+    editor_result = st.data_editor(
         df,
         column_config=column_config,
         use_container_width=True,
         key="grid_editor",
         on_change=save_changes,
+        on_select="rerun",
+        selection_mode="single-cell",
     )
 
     # --- Карточка ученика снизу таблицы ---
     st.divider()
     st.subheader("📋 Карточка ученика")
 
-    selected_student_display = st.selectbox(
-        "Выберите ученика для просмотра карточки",
-        list(all_student_dict.keys()),
-        key="card_select",
-    )
+    selected_sid = None
+    selection_info = st.session_state["grid_editor"].get("selection", {})
+    selected_rows = selection_info.get("rows", [])
 
-    if selected_student_display:
-      sel_sid = all_student_dict[selected_student_display]
+    if selected_rows:
+      row_idx = selected_rows[0]
+      current_indices = list(df.index)
+      if row_idx < len(current_indices):
+        clicked_full_name = current_indices[row_idx]
+        # Находим id ученика по выбранному имени
+        for sid, name, surname, grade, hw in all_students:
+          fn = f"{surname} {name}" + (
+              f" [{grade}]" if grade and grade != "-" else ""
+          )
+          if fn == clicked_full_name:
+            selected_sid = sid
+            break
+
+    if selected_sid:
       cursor.execute(
           "SELECT id, name, surname, grade, homework FROM students WHERE id = ?",
-          (sel_sid,),
+          (selected_sid,),
       )
       s_data = cursor.fetchone()
 
       if s_data:
         _, s_name, s_surname, s_grade, s_hw = s_data
 
-        # Управление режимом редактирования через session_state
-        edit_mode_key = f"edit_mode_{sel_sid}"
+        edit_mode_key = f"edit_mode_{selected_sid}"
         if edit_mode_key not in st.session_state:
           st.session_state[edit_mode_key] = False
 
         with st.container():
           if not st.session_state[edit_mode_key]:
-            # Режим просмотра
             st.markdown(f"**Имя:** {s_name}")
             st.markdown(f"**Фамилия:** {s_surname}")
             st.markdown(
@@ -371,25 +378,27 @@ if all_student_dict and start_date <= end_date:
 
             col_btn1, col_btn2, _ = st.columns([1, 1, 4])
             with col_btn1:
-              if st.button("✏️ Редактировать", key=f"btn_edit_{sel_sid}"):
+              if st.button("✏️ Редактировать", key=f"btn_edit_{selected_sid}"):
                 st.session_state[edit_mode_key] = True
                 st.rerun()
             with col_btn2:
               if st.button(
                   "🗑️ Удалить ученика",
-                  key=f"btn_del_{sel_sid}",
+                  key=f"btn_del_{selected_sid}",
                   type="primary",
               ):
-                cursor.execute("DELETE FROM students WHERE id = ?", (sel_sid,))
                 cursor.execute(
-                    "DELETE FROM attendance WHERE student_id = ?", (sel_sid,)
+                    "DELETE FROM students WHERE id = ?", (selected_sid,)
+                )
+                cursor.execute(
+                    "DELETE FROM attendance WHERE student_id = ?",
+                    (selected_sid,),
                 )
                 conn.commit()
                 st.success("Ученик успешно удален!")
                 st.rerun()
           else:
-            # Режим редактирования
-            with st.form(f"edit_form_{sel_sid}"):
+            with st.form(f"edit_form_{selected_sid}"):
               new_name = st.text_input("Имя", value=s_name)
               new_surname = st.text_input("Фамилия", value=s_surname)
               new_grade = st.text_input(
@@ -420,7 +429,7 @@ if all_student_dict and start_date <= end_date:
                           new_surname.strip(),
                           new_grade.strip(),
                           new_hw,
-                          sel_sid,
+                          selected_sid,
                       ),
                   )
                   conn.commit()
@@ -433,6 +442,8 @@ if all_student_dict and start_date <= end_date:
               if cancel_btn:
                 st.session_state[edit_mode_key] = False
                 st.rerun()
+    else:
+      st.info("💡 Нажмите на ученика в таблице для редактирования")
 
   else:
     st.info("Нет учеников для отображения (проверьте фильтр класса).")
