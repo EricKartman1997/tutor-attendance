@@ -357,6 +357,25 @@ def get_local_attendance():
   return {(r["student_id"], r["date"]): dict(r) for r in rows}
 
 
+# Функция для автоматического поиска ДЗ с предыдущего урока
+def get_current_homework_for_date(student_id, current_date_str):
+  l_conn = get_local_connection()
+  cursor = l_conn.cursor()
+  cursor.execute(
+      """
+        SELECT homework FROM attendance 
+        WHERE student_id = ? AND date < ? AND lesson_exists = 1 AND homework != ''
+        ORDER BY date DESC LIMIT 1
+    """,
+      (student_id, current_date_str),
+  )
+  row = cursor.fetchone()
+  l_conn.close()
+  if row and row["homework"]:
+    return row["homework"]
+  return ""
+
+
 local_attendance = get_local_attendance()
 
 all_student_dict = {}
@@ -466,18 +485,23 @@ if all_student_dict and start_date <= end_date:
               }
           )
 
-          # Уникальные ключи виджетов с привязкой к дате, чтобы они обновлялись при её смене
+          # Автоматически получаем текущее ДЗ с предыдущего урока
+          current_hw_text = get_current_homework_for_date(
+              selected_sid, lesson_date_str
+          )
+
+          # Уникальные ключи виджетов с привязкой к дате
           w_key_les = f"les_exist_{selected_sid}_{lesson_date_str}"
           w_key_stat = f"status_sel_{selected_sid}_{lesson_date_str}"
           w_key_paid = f"paid_chk_{selected_sid}_{lesson_date_str}"
-          w_key_hw = f"hw_txt_{selected_sid}_{lesson_date_str}"
+          w_key_hw = f"hw_txt_{selected_sid}_{lesson_date_str}"  # ДЗ на следующий урок
 
 
           def save_to_sqlite():
             l_exists = 1 if st.session_state.get(w_key_les) else 0
             stat = st.session_state.get(w_key_stat, "")
             paid = 1 if st.session_state.get(w_key_paid) else 0
-            hw = st.session_state.get(w_key_hw, "")
+            hw = st.session_state.get(w_key_hw, "")  # Сохраняем ДЗ на будущее
 
             l_conn = get_local_connection()
             cursor = l_conn.cursor()
@@ -513,6 +537,15 @@ if all_student_dict and start_date <= end_date:
 
           if lesson_exists_toggle:
             st.markdown("---")
+
+            # 1. Текущее домашнее задание (только для чтения)
+            st.text_area(
+                "Текущее домашнее задание (с прошлого урока)",
+                value=current_hw_text,
+                disabled=True,
+                key=f"cur_hw_display_{selected_sid}_{lesson_date_str}",
+            )
+
             status_options = [
                 "",
                 "Присутствовал",
@@ -539,8 +572,10 @@ if all_student_dict and start_date <= end_date:
                 key=w_key_paid,
                 on_change=save_to_sqlite,
             )
+
+            # 2. ДЗ на следующий урок (редактируемое)
             st.text_area(
-                "Домашнее задание",
+                "ДЗ на следующий урок",
                 value=att_record["homework"],
                 key=w_key_hw,
                 on_change=save_to_sqlite,
