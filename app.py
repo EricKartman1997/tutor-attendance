@@ -141,8 +141,13 @@ st.sidebar.markdown("""
 * 🔴 — Несвоевременно отменил
 """)
 
-# --- Экран: Фильтры (период дат и класс) ---
+# --- Экран: Фильтры (период дат: текущая неделя ПН-ВС) ---
 st.header("Электронный журнал")
+
+# Расчет понедельника и воскресенья текущей недели
+today = date.today()
+monday_of_current_week = today - timedelta(days=today.weekday())
+sunday_of_current_week = monday_of_current_week + timedelta(days=6)
 
 all_grade_nums = sorted(
     list(set(extract_grade_num(g) for _, _, _, g in all_students if g))
@@ -151,10 +156,12 @@ all_grade_nums = sorted(
 f_col1, f_col2, f_col3 = st.columns(3)
 with f_col1:
   start_date = st.date_input(
-      "С какого числа", value=date.today() - timedelta(days=7), key="start"
+      "С какого числа", value=monday_of_current_week, key="start"
   )
 with f_col2:
-  end_date = st.date_input("По какое число", value=date.today(), key="end")
+  end_date = st.date_input(
+      "По какое число", value=sunday_of_current_week, key="end"
+  )
 with f_col3:
   filter_grade = st.selectbox(
       "Фильтр по классу (цифра)", ["Все классы"] + all_grade_nums
@@ -312,42 +319,103 @@ if all_student_dict and start_date <= end_date:
 elif start_date > end_date:
   st.error("Дата начала не может быть позже даты окончания!")
 
-# --- Экспорт таблицы в Excel ---
+# --- Экспорт таблицы в Excel с выбором периода ---
 st.sidebar.divider()
-st.sidebar.subheader("Экспорт данных")
+st.sidebar.subheader("Экспорт данных в Excel")
 
-if not df.empty:
-  import io
+export_start = st.sidebar.date_input(
+    "С какого числа (экспорт)", value=monday_of_current_week, key="exp_start"
+)
+export_end = st.sidebar.date_input(
+    "По какое число (экспорт)", value=sunday_of_current_week, key="exp_end"
+)
 
-  # Создаем копию dataframe для экспорта
-  export_df = df.copy()
+if st.sidebar.button("📥 Скачать Excel отчёт"):
+  if export_start > export_end:
+    st.sidebar.error("Дата начала не может быть позже даты окончания!")
+  else:
+    # Загружаем данные из БД строго за выбранный для экспорта период
+    exp_date_range = [
+        (export_start + timedelta(days=i)).strftime("%Y-%m-%d")
+        for i in range((export_end - export_start).days + 1)
+    ]
 
-  # Обратная конвертация эмодзи в слова для Excel
-  emoji_to_full_text = {
-      "🟢": "Присутствовал",
-      "🟡": "Отменил заранее",
-      "🔴": "Несвоевременно отменил",
-      "": "",
-  }
+    cursor.execute(
+        """
+            SELECT s.id, s.name, s.surname, s.grade, a.date, a.status 
+            FROM students s
+            LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN ? AND ?
+        """,
+        (
+            export_start.strftime("%Y-%m-%d"),
+            export_end.strftime("%Y-%m-%d"),
+        ),
+    )
+    exp_records = cursor.fetchall()
 
-  for col in export_df.columns:
-    export_df[col] = export_df[col].map(emoji_to_full_text).fillna("")
+    exp_table_data = {}
+    for sid, name, surname, grade, d_str, stat in exp_records:
+      full_name = f"{surname} {name}" + (f" [{grade}]" if grade else "")
+      if full_name not in exp_table_data:
+        exp_table_data[full_name] = {
+            pd.to_datetime(d).strftime("%d.%m"): "" for d in exp_date_range
+        }
 
-  export_df = export_df.reset_index()
-  export_df.rename(columns={"index": "Ученик"}, inplace=True)
+      if d_str:
+        formatted_d = pd.to_datetime(d_str).strftime("%d.%m")
+        if (
+            full_name in exp_table_data
+            and formatted_d in exp_table_data[full_name]
+        ):
+          exp_table_data[full_name][formatted_d] = (
+              status_to_emoji(stat) if stat else ""
+          )
 
-  # Создаем буфер в памяти для записи файла Excel (.xlsx)
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    export_df.to_excel(writer, index=False, sheet_name="Посещаемость")
+    # Добавляем всех учеников на случай, если у них не было отметок за этот период
+    for sid, name, surname, grade in all_students:
+      full_name = f"{surname} {name}" + (f" [{grade}]" if grade else "")
+      if full_name not in exp_table_data:
+        exp_table_data[full_name] = {
+            pd.to_datetime(d).strftime("%d.%m"): "" for d in exp_date_range
+        }
 
-  excel_data = output.getvalue()
+    exp_flat_data = {}
+    for fn, dates_dict in exp_table_data.items():
+      exp_flat_data[fn] = dates_dict
 
-  st.sidebar.download_button(
-      label="📥 Скачать журнал (Excel .xlsx)",
-      data=excel_data,
-      file_name=f"tutor_attendance_{date.today().strftime('%Y-%m-%d')}.xlsx",
-      mime=(
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ),
-  )
+    exp_df = pd.DataFrame.from_dict(exp_flat_data, orient="index")
+    if not exp_df.empty:
+      exp_df = exp_df.sort_index()
+
+      # Конвертируем эмодзи в слова для Excel
+      emoji_to_full_text = {
+          "🟢": "Присутствовал",
+          "🟡": "Отменил заранее",
+          "🔴": "Несвоевременно отменил",
+          "": "",
+      }
+
+      for col in exp_df.columns:
+        exp_df[col] = exp_df[col].map(emoji_to_full_text).fillna("")
+
+      exp_df = exp_df.reset_index()
+      exp_df.rename(columns={"index": "Ученик"}, inplace=True)
+
+      import io
+
+      output = io.BytesIO()
+      with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        exp_df.to_excel(writer, index=False, sheet_name="Посещаемость")
+
+      excel_data = output.getvalue()
+
+      st.sidebar.download_button(
+          label="💾 Сохранить файл",
+          data=excel_data,
+          file_name=f"tutor_report_{export_start.strftime('%d.%m.%Y')}-{export_end.strftime('%d.%m.%Y')}.xlsx",
+          mime=(
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          ),
+      )
+    else:
+      st.sidebar.warning("Нет данных за выбранный период.")
