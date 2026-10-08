@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import io
 import os
 import re
 import sqlite3
@@ -17,7 +18,7 @@ st.markdown(
     <style>
     .block-container {
         max-width: 95% !important;
-        padding-top: 2rem;
+        padding-top: 3.5rem;
         padding-bottom: 2rem;
         padding-left: 2rem;
         padding-right: 2rem;
@@ -25,6 +26,11 @@ st.markdown(
     div[data-testid="stDataFrame"] div[role="grid"] div[role="gridcell"] {
         text-align: center !important;
         justify-content: center !important;
+    }
+    div[data-testid="stTextInput"] label, 
+    div[data-testid="stDateInput"] label, 
+    div[data-testid="stSelectbox"] label {
+        margin-bottom: 0.3rem !important;
     }
     </style>
 """,
@@ -85,6 +91,18 @@ def init_local_db():
 init_local_db()
 
 
+# Базовая функция получения посещаемости (вынесена наверх)
+def get_local_attendance():
+  l_conn = get_local_connection()
+  cursor = l_conn.cursor()
+  cursor.execute(
+      "SELECT student_id, date, status, paid, lesson_exists, homework FROM attendance"
+  )
+  rows = cursor.fetchall()
+  l_conn.close()
+  return {(r["student_id"], r["date"]): dict(r) for r in rows}
+
+
 # Синхронизация: Скачать данные из Supabase в локальный SQLite
 def pull_from_cloud():
   try:
@@ -142,8 +160,6 @@ if "db_initialized" not in st.session_state:
 
   st.session_state["db_initialized"] = True
   st.session_state["has_unsaved_changes"] = False
-
-st.title("📚 Журнал English Dream (SQLite Buffer Mode)")
 
 # --- Боковая панель: Синхронизация ---
 st.sidebar.header("☁️ Синхронизация с облаком")
@@ -268,21 +284,99 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
     else:
       st.sidebar.error("Заполните все поля!")
 
-# --- Легенда ---
-st.sidebar.divider()
-st.sidebar.markdown("""
-### 📌 Легенда
-* 🟢 — присутствовал | 🟡 — отменил заранее | 🔴 — несвоевременно | 🔘 — не заполнено
-* 💰 — оплачено | ⛔ — не оплачено
-* 📘 — ДЗ заполнено | 📕 — ДЗ пусто
-""")
 
-# --- Основной экран ---
-st.header("Электронный журнал")
+# --- Функция генерации Excel отчета из SQLite с шапкой периода ---
+def generate_excel_report(start_d, end_d, grade_filter, all_st, local_att):
+  output = io.BytesIO()
+  date_range = [
+      (start_d + timedelta(days=days)).strftime("%Y-%m-%d")
+      for days in range((end_d - start_d).days + 1)
+  ]
 
-today = date.today()
-monday = today - timedelta(days=today.weekday())
-sunday = monday + timedelta(days=6)
+  table_data = {}
+  for s in all_st:
+    g_num = extract_grade_num(s["grade"])
+
+    if grade_filter != "Все классы":
+      if grade_filter == "-" and s["grade"] != "-":
+        continue
+      elif (
+          grade_filter != "-"
+          and g_num != grade_filter
+          and s["grade"] != grade_filter
+      ):
+        continue
+
+    full_name = f"{s['surname']} {s['name']}" + (
+        f" [{s['grade']}]" if s["grade"] and s["grade"] != "-" else ""
+    )
+    table_data[full_name] = {
+        pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
+    }
+
+    for d_str in date_range:
+      att = local_att.get((s["id"], d_str))
+      if att and att["lesson_exists"] == 1:
+        fmt_d = pd.to_datetime(d_str).strftime("%d.%m")
+
+        l_conn_rep = get_local_connection()
+        cursor_rep = l_conn_rep.cursor()
+        cursor_rep.execute(
+            """
+                SELECT homework FROM attendance 
+                WHERE student_id = ? AND date < ? AND lesson_exists = 1 AND homework != ''
+                ORDER BY date DESC LIMIT 1
+            """,
+            (s["id"], d_str),
+        )
+        r_hw = cursor_rep.fetchone()
+        l_conn_rep.close()
+        cur_hw = r_hw["homework"] if r_hw and r_hw["homework"] else "-"
+
+        status_text = att["status"] or "Не указано"
+        paid_text = "Оплачено" if att["paid"] == 1 else "Не оплачено"
+        next_hw = att["homework"] or "-"
+
+        cell_text = (
+            f"Посещение: {status_text}\n"
+            f"Оплата: {paid_text}\n"
+            f"Текущее ДЗ: {cur_hw}\n"
+            f"ДЗ на след: {next_hw}"
+        )
+
+        if fmt_d in table_data[full_name]:
+          table_data[full_name][fmt_d] = cell_text
+
+  df_excel = pd.DataFrame.from_dict(table_data, orient="index")
+  if not df_excel.empty:
+    df_excel = df_excel.sort_index()
+
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    header_info = pd.DataFrame([
+        ["период с:", start_d.strftime("%d.%m.%Y")],
+        ["по:", end_d.strftime("%d.%m.%Y")],
+        ["Класс:", grade_filter],
+        [],
+    ])
+    header_info.to_excel(
+        writer,
+        sheet_name="Журнал репетитора",
+        index=False,
+        header=False,
+        startrow=0,
+    )
+
+    df_excel.to_excel(
+        writer, sheet_name="Журнал репетитора", startrow=4, index=True
+    )
+
+  return output.getvalue()
+
+
+# --- Основной экран (фильтры) ---
+today_val = date.today()
+monday_val = today_val - timedelta(days=today_val.weekday())
+sunday_val = monday_val + timedelta(days=6)
 
 has_no_grade = any(s["grade"] == "-" for s in all_students)
 all_grade_nums = sorted(
@@ -300,19 +394,61 @@ if has_no_grade:
 
 f_col1, f_col2, f_col3 = st.columns(3)
 with f_col1:
-  start_date = st.date_input("С какого числа", value=monday, key="start")
+  start_date = st.date_input("📅Дата начала:", value=monday_val, key="start")
 with f_col2:
-  end_date = st.date_input("По какое число", value=sunday, key="end")
+  end_date = st.date_input("🚧Дата окончания:", value=sunday_val, key="end")
 with f_col3:
-  filter_grade = st.selectbox("Фильтр по классу", filter_options)
+  filter_grade = st.selectbox("🎓Класс", filter_options)
 
 st.divider()
+
+# --- Блок отчетов в боковой панели с независимыми датами ---
+st.sidebar.divider()
+st.sidebar.header("📊 Отчеты Excel")
+report_start = st.sidebar.date_input(
+    "С такого периода", value=monday_val, key="rep_start"
+)
+report_end = st.sidebar.date_input(
+    "По такой период", value=sunday_val, key="rep_end"
+)
+
+# Передаем даты отчета в генератор Excel
+excel_bytes = generate_excel_report(
+    report_start, report_end, filter_grade, all_students, get_local_attendance()
+)
+
+st.sidebar.download_button(
+    label="📥 Скачать отчет Excel",
+    data=excel_bytes,
+    file_name=f"tutor_journal_{report_start}_{report_end}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    disabled=has_changes,
+    use_container_width=True,
+)
+if has_changes:
+  st.sidebar.caption(
+      "⚠️ Доступно только при синхронизированных данных (нет"
+      " несохраненных изменений)."
+  )
+
+st.sidebar.divider()
+st.sidebar.markdown("""
+### 📌 Легенда
+- 🟢 — присутствовал
+- 🟡 — отменил заранее
+- 🔴 — несвоевременно
+- 🔘 — не заполнено
+- 💰 — оплачено
+- ⛔ — не оплачено
+- 📘 — ДЗ заполнено
+- 📕 — ДЗ пусто
+""")
 
 
 def build_emoji_string(stat, paid, hw):
   p_emoji = (
       "🟢"
-      if stat == "Присутствовал"
+      if stat == "Present" or stat == "Присутствовал"
       else (
           "🟡"
           if stat == "Отменил заранее"
@@ -346,18 +482,6 @@ def delete_student_dialog(student_id, student_fullname):
       st.rerun()
 
 
-def get_local_attendance():
-  l_conn = get_local_connection()
-  cursor = l_conn.cursor()
-  cursor.execute(
-      "SELECT student_id, date, status, paid, lesson_exists, homework FROM attendance"
-  )
-  rows = cursor.fetchall()
-  l_conn.close()
-  return {(r["student_id"], r["date"]): dict(r) for r in rows}
-
-
-# Функция для автоматического поиска ДЗ с предыдущего урока
 def get_current_homework_for_date(student_id, current_date_str):
   l_conn = get_local_connection()
   cursor = l_conn.cursor()
@@ -464,7 +588,6 @@ if all_student_dict and start_date <= end_date:
           )
           lesson_date_str = lesson_date.strftime("%Y-%m-%d")
 
-          # Точечный запрос из базы для конкретной даты
           l_conn_single = get_local_connection()
           cursor_single = l_conn_single.cursor()
           cursor_single.execute(
@@ -485,23 +608,21 @@ if all_student_dict and start_date <= end_date:
               }
           )
 
-          # Автоматически получаем текущее ДЗ с предыдущего урока
           current_hw_text = get_current_homework_for_date(
               selected_sid, lesson_date_str
           )
 
-          # Уникальные ключи виджетов с привязкой к дате
           w_key_les = f"les_exist_{selected_sid}_{lesson_date_str}"
           w_key_stat = f"status_sel_{selected_sid}_{lesson_date_str}"
           w_key_paid = f"paid_chk_{selected_sid}_{lesson_date_str}"
-          w_key_hw = f"hw_txt_{selected_sid}_{lesson_date_str}"  # ДЗ на следующий урок
+          w_key_hw = f"hw_txt_{selected_sid}_{lesson_date_str}"
 
 
           def save_to_sqlite():
             l_exists = 1 if st.session_state.get(w_key_les) else 0
             stat = st.session_state.get(w_key_stat, "")
             paid = 1 if st.session_state.get(w_key_paid) else 0
-            hw = st.session_state.get(w_key_hw, "")  # Сохраняем ДЗ на будущее
+            hw = st.session_state.get(w_key_hw, "")
 
             l_conn = get_local_connection()
             cursor = l_conn.cursor()
@@ -537,10 +658,8 @@ if all_student_dict and start_date <= end_date:
 
           if lesson_exists_toggle:
             st.markdown("---")
-
-            # 1. Текущее домашнее задание (только для чтения)
             st.text_area(
-                "Текущее домашнее задание (с прошлого урока)",
+                "Текущее домашнее задание",
                 value=current_hw_text,
                 disabled=True,
                 key=f"cur_hw_display_{selected_sid}_{lesson_date_str}",
@@ -572,8 +691,6 @@ if all_student_dict and start_date <= end_date:
                 key=w_key_paid,
                 on_change=save_to_sqlite,
             )
-
-            # 2. ДЗ на следующий урок (редактируемое)
             st.text_area(
                 "ДЗ на следующий урок",
                 value=att_record["homework"],
