@@ -92,7 +92,7 @@ def extract_grade_num(grade_str):
 cursor.execute("SELECT id, name, surname, grade, homework FROM students")
 all_students = cursor.fetchall()
 
-# --- Боковая панель: Управление учениками (Все поля обязательны) ---
+# --- Боковая панель: Управление учениками ---
 st.sidebar.header("Управление учениками")
 
 with st.sidebar.form("add_student_form", clear_on_submit=True):
@@ -267,8 +267,7 @@ if all_student_dict and start_date <= end_date:
     }
 
     st.markdown(
-        "💡 *Изменения в ячейках сохраняются автоматически. Нажмите на любуую"
-        " ячейку в строке ученика, чтобы открыть его карточку.*"
+        "💡 *Изменения в ячейках посещаемости сохраняются автоматически.*"
     )
 
 
@@ -318,132 +317,133 @@ if all_student_dict and start_date <= end_date:
         conn.commit()
 
 
-    # Таблица с поддержкой кликов по ячейкам/строкам
-    editor_result = st.data_editor(
+    # Таблица для редактирования посещаемости
+    st.data_editor(
         df,
         column_config=column_config,
         use_container_width=True,
         key="grid_editor",
         on_change=save_changes,
-        on_select="rerun",
-        selection_mode="single-cell",
     )
 
-    # --- Карточка ученика снизу таблицы ---
+    # --- Карточка ученика под таблицей ---
     st.divider()
     st.subheader("📋 Карточка ученика")
 
-    selected_sid = None
-    selection_info = st.session_state["grid_editor"].get("selection", {})
-    selected_rows = selection_info.get("rows", [])
+    # Получаем список отображаемых учеников из таблицы
+    table_student_options = ["-- Выберите ученика --"] + list(df.index)
+    selected_student_row = st.selectbox(
+        "Выберите ученика для просмотра и редактирования карточки",
+        table_student_options,
+        key="card_student_select",
+    )
 
-    if selected_rows:
-      row_idx = selected_rows[0]
-      current_indices = list(df.index)
-      if row_idx < len(current_indices):
-        clicked_full_name = current_indices[row_idx]
-        # Находим id ученика по выбранному имени
-        for sid, name, surname, grade, hw in all_students:
-          fn = f"{surname} {name}" + (
-              f" [{grade}]" if grade and grade != "-" else ""
-          )
-          if fn == clicked_full_name:
-            selected_sid = sid
-            break
+    if selected_student_row != "-- Выберите ученика --":
+      selected_sid = None
+      for sid, name, surname, grade, hw in all_students:
+        fn = f"{surname} {name}" + (
+            f" [{grade}]" if grade and grade != "-" else ""
+        )
+        if fn == selected_student_row:
+          selected_sid = sid
+          break
 
-    if selected_sid:
-      cursor.execute(
-          "SELECT id, name, surname, grade, homework FROM students WHERE id = ?",
-          (selected_sid,),
-      )
-      s_data = cursor.fetchone()
+      if selected_sid:
+        cursor.execute(
+            "SELECT id, name, surname, grade, homework FROM students WHERE id ="
+            " ?",
+            (selected_sid,),
+        )
+        s_data = cursor.fetchone()
 
-      if s_data:
-        _, s_name, s_surname, s_grade, s_hw = s_data
+        if s_data:
+          _, s_name, s_surname, s_grade, s_hw = s_data
 
-        edit_mode_key = f"edit_mode_{selected_sid}"
-        if edit_mode_key not in st.session_state:
-          st.session_state[edit_mode_key] = False
+          edit_mode_key = f"edit_mode_{selected_sid}"
+          if edit_mode_key not in st.session_state:
+            st.session_state[edit_mode_key] = False
 
-        with st.container():
-          if not st.session_state[edit_mode_key]:
-            st.markdown(f"**Имя:** {s_name}")
-            st.markdown(f"**Фамилия:** {s_surname}")
-            st.markdown(
-                f"**Класс:** {s_grade if s_grade and s_grade != '-' else 'Без класса'}"
-            )
-            st.markdown(
-                f"**Текущее домашнее задание:** {s_hw if s_hw else 'Нет заданий'}"
-            )
-
-            col_btn1, col_btn2, _ = st.columns([1, 1, 4])
-            with col_btn1:
-              if st.button("✏️ Редактировать", key=f"btn_edit_{selected_sid}"):
-                st.session_state[edit_mode_key] = True
-                st.rerun()
-            with col_btn2:
-              if st.button(
-                  "🗑️ Удалить ученика",
-                  key=f"btn_del_{selected_sid}",
-                  type="primary",
-              ):
-                cursor.execute(
-                    "DELETE FROM students WHERE id = ?", (selected_sid,)
-                )
-                cursor.execute(
-                    "DELETE FROM attendance WHERE student_id = ?",
-                    (selected_sid,),
-                )
-                conn.commit()
-                st.success("Ученик успешно удален!")
-                st.rerun()
-          else:
-            with st.form(f"edit_form_{selected_sid}"):
-              new_name = st.text_input("Имя", value=s_name)
-              new_surname = st.text_input("Фамилия", value=s_surname)
-              new_grade = st.text_input(
-                  "Класс (или '-' если без класса)", value=s_grade
+          with st.container():
+            if not st.session_state[edit_mode_key]:
+              st.markdown(f"**Имя:** {s_name}")
+              st.markdown(f"**Фамилия:** {s_surname}")
+              st.markdown(
+                  f"**Класс:** {s_grade if s_grade and s_grade != '-' else 'Без класса'}"
               )
-              new_hw = st.text_area("Текущее домашнее задание", value=s_hw)
+              st.markdown(
+                  f"**Текущее домашнее задание:** {s_hw if s_hw else 'Нет заданий'}"
+              )
 
-              f_col1, f_col2 = st.columns(2)
-              with f_col1:
-                save_btn = st.form_submit_button("💾 Сохранить изменения")
-              with f_col2:
-                cancel_btn = st.form_submit_button("❌ Отмена")
-
-              if save_btn:
-                if (
-                    new_name.strip()
-                    and new_surname.strip()
-                    and new_grade.strip()
+              col_btn1, col_btn2, _ = st.columns([1, 1, 4])
+              with col_btn1:
+                if st.button(
+                    "✏️ Редактировать", key=f"btn_edit_{selected_sid}"
+                ):
+                  st.session_state[edit_mode_key] = True
+                  st.rerun()
+              with col_btn2:
+                if st.button(
+                    "🗑️ Удалить ученика",
+                    key=f"btn_del_{selected_sid}",
+                    type="primary",
                 ):
                   cursor.execute(
-                      """
-                                        UPDATE students 
-                                        SET name = ?, surname = ?, grade = ?, homework = ? 
-                                        WHERE id = ?
-                                    """,
-                      (
-                          new_name.strip(),
-                          new_surname.strip(),
-                          new_grade.strip(),
-                          new_hw,
-                          selected_sid,
-                      ),
+                      "DELETE FROM students WHERE id = ?", (selected_sid,)
+                  )
+                  cursor.execute(
+                      "DELETE FROM attendance WHERE student_id = ?",
+                      (selected_sid,),
                   )
                   conn.commit()
-                  st.session_state[edit_mode_key] = False
-                  st.success("Данные успешно обновлены!")
+                  st.success("Ученик успешно удален!")
                   st.rerun()
-                else:
-                  st.error("Все поля должны быть заполнены.")
+            else:
+              with st.form(f"edit_form_{selected_sid}"):
+                new_name = st.text_input("Имя", value=s_name)
+                new_surname = st.text_input("Фамилия", value=s_surname)
+                new_grade = st.text_input(
+                    "Класс (или '-' если без класса)", value=s_grade
+                )
+                new_hw = st.text_area("Текущее домашнее задание", value=s_hw)
 
-              if cancel_btn:
-                st.session_state[edit_mode_key] = False
-                st.rerun()
+                f_col1, f_col2 = st.columns(2)
+                with f_col1:
+                  save_btn = st.form_submit_button("💾 Сохранить изменения")
+                with f_col2:
+                  cancel_btn = st.form_submit_button("❌ Отмена")
+
+                if save_btn:
+                  if (
+                      new_name.strip()
+                      and new_surname.strip()
+                      and new_grade.strip()
+                  ):
+                    cursor.execute(
+                        """
+                                          UPDATE students 
+                                          SET name = ?, surname = ?, grade = ?, homework = ? 
+                                          WHERE id = ?
+                                      """,
+                        (
+                            new_name.strip(),
+                            new_surname.strip(),
+                            new_grade.strip(),
+                            new_hw,
+                            selected_sid,
+                        ),
+                    )
+                    conn.commit()
+                    st.session_state[edit_mode_key] = False
+                    st.success("Данные успешно обновлены!")
+                    st.rerun()
+                  else:
+                    st.error("Все поля должны быть заполнены.")
+
+                if cancel_btn:
+                    st.session_state[edit_mode_key] = False
+                    st.rerun()
     else:
-      st.info("💡 Нажмите на ученика в таблице для редактирования")
+      st.info("💡 Нажмите на ученика для редактирования")
 
   else:
     st.info("Нет учеников для отображения (проверьте фильтр класса).")
@@ -488,7 +488,7 @@ if st.sidebar.button("📥 Скачать Excel отчёт"):
       full_name = f"{surname} {name}" + (
           f" [{grade}]" if grade and grade != "-" else ""
       )
-      if full_name not in exp_table_data:
+      if full_name not in exp_exp_table_data if 'exp_exp_table_data' in locals() else full_name not in exp_table_data:
         exp_table_data[full_name] = {
             pd.to_datetime(d).strftime("%d.%m"): "" for d in exp_date_range
         }
