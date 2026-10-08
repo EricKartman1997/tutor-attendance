@@ -21,23 +21,9 @@ st.markdown(
         padding-right: 2rem;
     }
     
-    div[data-testid="stDataEditor"] div[role="grid"] div[role="gridcell"] {
+    div[data-testid="stDataFrame"] div[role="grid"] div[role="gridcell"] {
         text-align: center !important;
         justify-content: center !important;
-    }
-    
-    div[data-testid="stDataEditor"] [data-baseweb="select"] span {
-        text-align: center !important;
-        width: 100% !important;
-        display: flex !important;
-        justify-content: center !important;
-        align-items: center !important;
-    }
-    
-    div[data-testid="stDataEditor"] div[role="gridcell"] div {
-        text-align: center !important;
-        justify-content: center !important;
-        align-items: center !important;
     }
     </style>
 """,
@@ -72,12 +58,24 @@ cursor.execute(
         student_id INTEGER,
         date TEXT,
         status TEXT,
+        paid INTEGER DEFAULT 0,
+        lesson_exists INTEGER DEFAULT 0,
         PRIMARY KEY (student_id, date),
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
     )
 """
 )
-conn.commit()
+
+cursor.execute("PRAGMA table_info(attendance)")
+att_columns = [col[1] for col in cursor.fetchall()]
+if "paid" not in att_columns:
+  cursor.execute("ALTER TABLE attendance ADD COLUMN paid INTEGER DEFAULT 0")
+  conn.commit()
+if "lesson_exists" not in att_columns:
+  cursor.execute(
+      "ALTER TABLE attendance ADD COLUMN lesson_exists INTEGER DEFAULT 0"
+  )
+  conn.commit()
 
 st.title("📚 Журнал посещаемости репетитора")
 
@@ -118,10 +116,7 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
       st.sidebar.success(f"Ученик {f_name} {f_surname} добавлен!")
       st.rerun()
     else:
-      st.sidebar.error(
-          "Все поля обязательны для заполнения! (В поле класса можно указать"
-          " '-')"
-      )
+      st.sidebar.error("Все поля обязательны для заполнения!")
 
 all_student_dict = {}
 for sid, name, surname, grade, hw in all_students:
@@ -129,12 +124,24 @@ for sid, name, surname, grade, hw in all_students:
   display_name = f"{surname} {name}{grade_str}"
   all_student_dict[display_name] = sid
 
+# --- Красивая легенда в боковой панели ---
 st.sidebar.divider()
 st.sidebar.markdown("""
-### 📌 Подсказка (Легенда)
-* 🟢 — Присутствовал
-* 🟡 — Отменил заранее
-* 🔴 — Несвоевременно отменил
+### 📌 Легенда
+
+**Посещение:**
+* 🟢 — присутствовал
+* 🟡 — отменил заранее
+* 🔴 — несвоевременно отменил
+* 🔘 — не заполнено
+
+**Оплата:**
+* 💰 — оплачено 
+* ⛔ — не оплачено
+
+**Домашнее задание:**
+* 📘 — заполнено 
+* 📕 — не заполнено
 """)
 
 # --- Экран: Фильтры ---
@@ -158,9 +165,7 @@ with f_col1:
       "С какого числа", value=monday_of_current_week, key="start"
   )
 with f_col2:
-  end_date = st.date_input(
-      "По какое число", value=sunday_of_current_week, key="end"
-  )
+  end_date = st.date_input("По какое число", value=sunday_of_current_week, key="end")
 with f_col3:
   filter_grade = st.selectbox(
       "Фильтр по классу (цифра)", ["Все классы"] + all_grade_nums
@@ -169,27 +174,44 @@ with f_col3:
 st.divider()
 
 
-def status_to_emoji(stat):
+# Функция формирования строки из 3 эмодзи
+def build_emoji_string(stat, paid, hw):
   if stat == "Присутствовал":
-    return "🟢"
+    p_emoji = "🟢"
   elif stat == "Отменил заранее":
-    return "🟡"
+    p_emoji = "🟡"
   elif stat == "Несвоевременно отменил":
-    return "🔴"
-  return ""
+    p_emoji = "🔴"
+  else:
+    p_emoji = "🔘"
+
+  pay_emoji = "💰" if paid == 1 else "⛔"
+  hw_emoji = "📘" if (hw and hw.strip()) else "📕"
+
+  return f"{p_emoji} {pay_emoji} {hw_emoji}"
 
 
-def emoji_to_status(emoji):
-  if emoji == "🟢":
-    return "Присутствовал"
-  elif emoji == "🟡":
-    return "Отменил заранее"
-  elif emoji == "🔴":
-    return "Несвоевременно отменил"
-  return None
+# --- Встроенное официальное модальное окно Streamlit для удаления ---
+@st.dialog("🗑️ Подтверждение удаления")
+def delete_student_dialog(student_id, student_fullname):
+  st.warning(
+      f"Вы действительно хотите удалить ученика **{student_fullname}**?"
+      " Вся история посещений и оплат будет удалена."
+  )
+  col_yes, col_no = st.columns(2)
+  with col_yes:
+    if st.button("Да, удалить", type="primary", use_container_width=True):
+      cursor.execute("DELETE FROM students WHERE id = ?", (student_id,))
+      cursor.execute("DELETE FROM attendance WHERE student_id = ?", (student_id,))
+      conn.commit()
+      st.success("Ученик успешно удален!")
+      st.rerun()
+  with col_no:
+    if st.button("Отмена", use_container_width=True):
+      st.rerun()
 
 
-# --- Основной экран: Таблица посещаемости ---
+# --- Основной экран: Таблица посещаемости (Только для демонстрации) ---
 if all_student_dict and start_date <= end_date:
   date_range = [
       (start_date + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -198,7 +220,7 @@ if all_student_dict and start_date <= end_date:
 
   cursor.execute(
       """
-        SELECT s.id, s.name, s.surname, s.grade, a.date, a.status 
+        SELECT s.id, s.name, s.surname, s.grade, s.homework, a.date, a.status, a.paid, a.lesson_exists 
         FROM students s
         LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN ? AND ?
     """,
@@ -207,7 +229,7 @@ if all_student_dict and start_date <= end_date:
   records = cursor.fetchall()
 
   table_data = {}
-  for sid, name, surname, grade, d_str, stat in records:
+  for sid, name, surname, grade, hw_global, d_str, stat, paid, l_exists in records:
     g_num = extract_grade_num(grade)
     if (
         filter_grade != "Все классы"
@@ -221,16 +243,17 @@ if all_student_dict and start_date <= end_date:
     )
     if full_name not in table_data:
       table_data[full_name] = {
-          pd.to_datetime(d).strftime("%d.%m"): {"db_date": d, "emoji": ""}
-          for d in date_range
+          pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
       }
 
-    if d_str:
+    if d_str and l_exists == 1:
       formatted_d = pd.to_datetime(d_str).strftime("%d.%m")
       if full_name in table_data and formatted_d in table_data[full_name]:
-        table_data[full_name][formatted_d]["emoji"] = status_to_emoji(stat)
+        table_data[full_name][formatted_d] = build_emoji_string(
+            stat, paid, hw_global
+        )
 
-  for sid, name, surname, grade, hw in all_students:
+  for sid, name, surname, grade, hw_global in all_students:
     g_num = extract_grade_num(grade)
     if (
         filter_grade != "Все классы"
@@ -243,97 +266,27 @@ if all_student_dict and start_date <= end_date:
     )
     if full_name not in table_data:
       table_data[full_name] = {
-          pd.to_datetime(d).strftime("%d.%m"): {"db_date": d, "emoji": ""}
-          for d in date_range
+          pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
       }
 
-  flat_table_data = {}
-  for fn, dates_dict in table_data.items():
-    flat_table_data[fn] = {
-        col_name: info["emoji"] for col_name, info in dates_dict.items()
-    }
-
-  df = pd.DataFrame.from_dict(flat_table_data, orient="index")
+  df = pd.DataFrame.from_dict(table_data, orient="index")
   if not df.empty:
     df = df.sort_index()
 
-    column_config = {
-        col: st.column_config.SelectboxColumn(
-            col,
-            options=["", "🟢", "🟡", "🔴"],
-            required=False,
-        )
-        for col in df.columns
-    }
-
     st.markdown(
-        "💡 *Изменения в ячейках посещаемости сохраняются автоматически.*"
+        "💡 *Таблица служит для демонстрации информации. Управление учениками,"
+        " посещаемостью и оплатой производится через карточку ниже.*"
     )
 
-
-    def save_changes():
-      edited_data = st.session_state["grid_editor"]
-      current_indices = list(df.index)
-
-      if "edited_rows" in edited_data:
-        for row_idx_str, changes in edited_data["edited_rows"].items():
-          row_idx = int(row_idx_str)
-          full_name = current_indices[row_idx]
-
-          target_sid = None
-          for sid, name, surname, grade, hw in all_students:
-            fn = f"{surname} {name}" + (
-                f" [{grade}]" if grade and grade != "-" else ""
-            )
-            if fn == full_name:
-              target_sid = sid
-              break
-
-          if target_sid:
-            for col_name, selected_emoji in changes.items():
-              real_date = None
-              if (
-                  full_name in table_data
-                  and col_name in table_data[full_name]
-              ):
-                real_date = table_data[full_name][col_name]["db_date"]
-
-              if real_date:
-                real_status = emoji_to_status(selected_emoji)
-
-                if real_status:
-                  cursor.execute(
-                      """
-                                            INSERT INTO attendance (student_id, date, status) VALUES (?, ?, ?)
-                                            ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status
-                                        """,
-                      (target_sid, real_date, real_status),
-                  )
-                else:
-                  cursor.execute(
-                      "DELETE FROM attendance WHERE student_id = ? AND date = ?",
-                      (target_sid, real_date),
-                  )
-        conn.commit()
-
-
-    # Таблица для редактирования посещаемости
-    st.data_editor(
-        df,
-        column_config=column_config,
-        use_container_width=True,
-        key="grid_editor",
-        on_change=save_changes,
-    )
+    st.dataframe(df, use_container_width=True)
 
     # --- Карточка ученика под таблицей ---
     st.divider()
-    st.subheader("📋 Карточка ученика")
+    st.subheader("📋 Карточка ученика и управление занятием")
 
-    # Получаем список отображаемых учеников из таблицы
     table_student_options = ["-- Выберите ученика --"] + list(df.index)
     selected_student_row = st.selectbox(
-        "Выберите ученика для просмотра и редактирования карточки",
+        "Выберите ученика для просмотра карточки",
         table_student_options,
         key="card_student_select",
     )
@@ -365,38 +318,167 @@ if all_student_dict and start_date <= end_date:
 
           with st.container():
             if not st.session_state[edit_mode_key]:
-              st.markdown(f"**Имя:** {s_name}")
-              st.markdown(f"**Фамилия:** {s_surname}")
-              st.markdown(
-                  f"**Класс:** {s_grade if s_grade and s_grade != '-' else 'Без класса'}"
+              grade_display = (
+                  f"Класс: {s_grade}"
+                  if s_grade and s_grade != "-"
+                  else "Без класса"
               )
               st.markdown(
-                  f"**Текущее домашнее задание:** {s_hw if s_hw else 'Нет заданий'}"
+                  f"**Ученик:** {s_surname} {s_name} &nbsp;|&nbsp;"
+                  f" **{grade_display}**"
               )
 
-              col_btn1, col_btn2, _ = st.columns([1, 1, 4])
+              lesson_date = st.date_input(
+                  "Дата урока для настройки", value=date.today(), key="card_date"
+              )
+              lesson_date_str = lesson_date.strftime("%Y-%m-%d")
+
+              cursor.execute(
+                  "SELECT status, paid, lesson_exists FROM attendance WHERE"
+                  " student_id = ? AND date = ?",
+                  (selected_sid, lesson_date_str),
+              )
+              att_record = cursor.fetchone()
+              current_lesson_exists = (
+                  bool(att_record[2])
+                  if att_record and att_record[2] == 1
+                  else False
+              )
+              current_status = att_record[0] if att_record else ""
+              current_paid = (
+                  bool(att_record[1])
+                  if att_record and att_record[1] == 1
+                  else False
+              )
+
+
+              # --- Функции автосохранения на лету ---
+              def toggle_lesson_exists_callback():
+                val = 1 if st.session_state[f"les_exist_{selected_sid}"] else 0
+                if val == 1:
+                  cursor.execute(
+                      """
+                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists) VALUES (?, ?, '', 0, 1)
+                                        ON CONFLICT(student_id, date) DO UPDATE SET lesson_exists=1
+                                    """,
+                      (selected_sid, lesson_date_str),
+                  )
+                else:
+                  cursor.execute(
+                      """
+                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists) VALUES (?, ?, '', 0, 0)
+                                        ON CONFLICT(student_id, date) DO UPDATE SET lesson_exists=0, status='', paid=0
+                                    """,
+                      (selected_sid, lesson_date_str),
+                  )
+                conn.commit()
+
+
+              def update_status_callback():
+                new_stat = st.session_state[f"status_sel_{selected_sid}"]
+                cursor.execute(
+                    """
+                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists) VALUES (?, ?, ?, ?, 1)
+                                    ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status, lesson_exists=1
+                                """,
+                    (
+                        selected_sid,
+                        lesson_date_str,
+                        new_stat,
+                        1 if current_paid else 0,
+                    ),
+                )
+                conn.commit()
+
+
+              def update_paid_callback():
+                new_p = (
+                    1 if st.session_state[f"paid_chk_{selected_sid}"] else 0
+                )
+                cursor.execute(
+                    """
+                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists) VALUES (?, ?, ?, ?, 1)
+                                    ON CONFLICT(student_id, date) DO UPDATE SET paid=excluded.paid, lesson_exists=1
+                                """,
+                    (selected_sid, lesson_date_str, current_status, new_p),
+                )
+                conn.commit()
+
+
+              def update_hw_callback():
+                new_hw_val = st.session_state[f"hw_txt_{selected_sid}"]
+                cursor.execute(
+                    "UPDATE students SET homework = ? WHERE id = ?",
+                    (new_hw_val, selected_sid),
+                )
+                conn.commit()
+
+
+              # Галочка «Урок есть»
+              lesson_exists_toggle = st.checkbox(
+                  "Урок есть",
+                  value=current_lesson_exists,
+                  key=f"les_exist_{selected_sid}",
+                  on_change=toggle_lesson_exists_callback,
+              )
+
+              if lesson_exists_toggle:
+                st.markdown("---")
+                status_options = [
+                    "",
+                    "Присутствовал",
+                    "Отменил заранее",
+                    "Несвоевременно отменил",
+                ]
+                default_idx = (
+                    status_options.index(current_status)
+                    if current_status in status_options
+                    else 0
+                )
+
+                st.selectbox(
+                    "Посещаемость",
+                    status_options,
+                    index=default_idx,
+                    key=f"status_sel_{selected_sid}",
+                    on_change=update_status_callback,
+                )
+
+                st.checkbox(
+                    "Оплата получена",
+                    value=current_paid,
+                    key=f"paid_chk_{selected_sid}",
+                    on_change=update_paid_callback,
+                )
+
+                st.text_area(
+                    "Текущее домашнее задание",
+                    value=s_hw,
+                    key=f"hw_txt_{selected_sid}",
+                    on_change=update_hw_callback,
+                )
+                st.markdown(
+                    "💡 *Изменения полей сохраняются автоматически при их"
+                    " изменении.*"
+                )
+
+              st.divider()
+              # Кнопки управления данными ученика
+              col_btn1, _, col_btn2 = st.columns([2, 3, 2])
               with col_btn1:
                 if st.button(
-                    "✏️ Редактировать", key=f"btn_edit_{selected_sid}"
+                    "✏️ Изменить данные ученика", key=f"btn_edit_{selected_sid}"
                 ):
                   st.session_state[edit_mode_key] = True
                   st.rerun()
               with col_btn2:
                 if st.button(
-                    "🗑️ Удалить ученика",
-                    key=f"btn_del_{selected_sid}",
-                    type="primary",
+                    "🗑️ Удалить ученика", key=f"btn_del_native_{selected_sid}"
                 ):
-                  cursor.execute(
-                      "DELETE FROM students WHERE id = ?", (selected_sid,)
+                  delete_student_dialog(
+                      selected_sid, f"{s_surname} {s_name}"
                   )
-                  cursor.execute(
-                      "DELETE FROM attendance WHERE student_id = ?",
-                      (selected_sid,),
-                  )
-                  conn.commit()
-                  st.success("Ученик успешно удален!")
-                  st.rerun()
+
             else:
               with st.form(f"edit_form_{selected_sid}"):
                 new_name = st.text_input("Имя", value=s_name)
@@ -404,11 +486,10 @@ if all_student_dict and start_date <= end_date:
                 new_grade = st.text_input(
                     "Класс (или '-' если без класса)", value=s_grade
                 )
-                new_hw = st.text_area("Текущее домашнее задание", value=s_hw)
 
                 f_col1, f_col2 = st.columns(2)
                 with f_col1:
-                  save_btn = st.form_submit_button("💾 Сохранить изменения")
+                  save_btn = st.form_submit_button("💾 Сохранить карточку")
                 with f_col2:
                   cancel_btn = st.form_submit_button("❌ Отмена")
 
@@ -421,29 +502,28 @@ if all_student_dict and start_date <= end_date:
                     cursor.execute(
                         """
                                           UPDATE students 
-                                          SET name = ?, surname = ?, grade = ?, homework = ? 
+                                          SET name = ?, surname = ?, grade = ? 
                                           WHERE id = ?
                                       """,
                         (
                             new_name.strip(),
                             new_surname.strip(),
                             new_grade.strip(),
-                            new_hw,
                             selected_sid,
                         ),
                     )
                     conn.commit()
                     st.session_state[edit_mode_key] = False
-                    st.success("Данные успешно обновлены!")
+                    st.success("Данные ученика обновлены!")
                     st.rerun()
                   else:
                     st.error("Все поля должны быть заполнены.")
 
                 if cancel_btn:
-                    st.session_state[edit_mode_key] = False
-                    st.rerun()
+                  st.session_state[edit_mode_key] = False
+                  st.rerun()
     else:
-      st.info("💡 Нажмите на ученика для редактирования")
+      st.info("💡 Выберите ученика в списке выше для работы с карточкой")
 
   else:
     st.info("Нет учеников для отображения (проверьте фильтр класса).")
@@ -472,7 +552,7 @@ if st.sidebar.button("📥 Скачать Excel отчёт"):
 
     cursor.execute(
         """
-            SELECT s.id, s.name, s.surname, s.grade, a.date, a.status 
+            SELECT s.id, s.name, s.surname, s.grade, s.homework, a.date, a.status, a.paid, a.lesson_exists 
             FROM students s
             LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN ? AND ?
         """,
@@ -484,26 +564,26 @@ if st.sidebar.button("📥 Скачать Excel отчёт"):
     exp_records = cursor.fetchall()
 
     exp_table_data = {}
-    for sid, name, surname, grade, d_str, stat in exp_records:
+    for sid, name, surname, grade, hw_global, d_str, stat, paid, l_exists in exp_records:
       full_name = f"{surname} {name}" + (
           f" [{grade}]" if grade and grade != "-" else ""
       )
-      if full_name not in exp_exp_table_data if 'exp_exp_table_data' in locals() else full_name not in exp_table_data:
+      if full_name not in exp_table_data:
         exp_table_data[full_name] = {
             pd.to_datetime(d).strftime("%d.%m"): "" for d in exp_date_range
         }
 
-      if d_str:
+      if d_str and l_exists == 1:
         formatted_d = pd.to_datetime(d_str).strftime("%d.%m")
         if (
             full_name in exp_table_data
             and formatted_d in exp_table_data[full_name]
         ):
-          exp_table_data[full_name][formatted_d] = (
-              status_to_emoji(stat) if stat else ""
+          exp_table_data[full_name][formatted_d] = build_emoji_string(
+              stat, paid, hw_global
           )
 
-    for sid, name, surname, grade, hw in all_students:
+    for sid, name, surname, grade, hw_global in all_students:
       full_name = f"{surname} {name}" + (
           f" [{grade}]" if grade and grade != "-" else ""
       )
@@ -519,16 +599,6 @@ if st.sidebar.button("📥 Скачать Excel отчёт"):
     exp_df = pd.DataFrame.from_dict(exp_flat_data, orient="index")
     if not exp_df.empty:
       exp_df = exp_df.sort_index()
-
-      emoji_to_full_text = {
-          "🟢": "Присутствовал",
-          "🟡": "Отменил заранее",
-          "🔴": "Несвоевременно отменил",
-          "": "",
-      }
-
-      for col in exp_df.columns:
-        exp_df[col] = exp_df[col].map(emoji_to_full_text).fillna("")
 
       exp_df = exp_df.reset_index()
       exp_df.rename(columns={"index": "Ученик"}, inplace=True)
