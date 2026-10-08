@@ -33,52 +33,166 @@ st.markdown(
 
 
 # --- Подключение к облачной базе данных Supabase (PostgreSQL) ---
-# На продакшене (Streamlit Cloud) строка берется из st.secrets["DATABASE_URL"]
-# Для локального теста можете временно заменить на вашу строку из Supabase:
-# "postgresql://postgres:ваш_пароль@db.xxxx.supabase.co:5432/postgres"
 def get_db_connection():
   try:
     db_url = st.secrets["DATABASE_URL"]
   except Exception:
-    # Запасной вариант для локального запуска (вставьте сюда свою строку из Supabase)
+    # Запасной вариант для локального запуска через Connection Pooler
     db_url = os.getenv(
-        "DATABASE_URL", "postgresql://postgres.doqhdknjzfrtekrwoqnk:VWRKnSLy4N5rXVHp@aws-1-eu-west-3.pooler.supabase.com:5432/postgres"
+        "DATABASE_URL",
+        "postgresql://postgres.doqhdknjzfrtekrwoqnk:VWRKnSLy4N5rXVHp@aws-1-eu-west-3.pooler.supabase.com:5432/postgres",
     )
-
   return psycopg2.connect(db_url)
 
 
-conn = get_db_connection()
-conn.autocommit = True
-cursor = conn.cursor()
-
-# Проверка и создание таблиц в PostgreSQL (если их еще нет)
-cursor.execute(
+# Инициализация таблиц в облаке при первом запуске
+def init_db():
+  try:
+    conn = get_db_connection()
+    conn.autocommit = True
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS students (
+            id SERIAL PRIMARY KEY,
+            name TEXT,
+            surname TEXT,
+            grade TEXT
+        )
     """
-    CREATE TABLE IF NOT EXISTS students (
-        id SERIAL PRIMARY KEY,
-        name TEXT,
-        surname TEXT,
-        grade TEXT
     )
-"""
-)
-
-cursor.execute(
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attendance (
+            student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
+            date TEXT,
+            status TEXT,
+            paid INTEGER DEFAULT 0,
+            lesson_exists INTEGER DEFAULT 0,
+            homework TEXT DEFAULT '',
+            PRIMARY KEY (student_id, date)
+        )
     """
-    CREATE TABLE IF NOT EXISTS attendance (
-        student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
-        date TEXT,
-        status TEXT,
-        paid INTEGER DEFAULT 0,
-        lesson_exists INTEGER DEFAULT 0,
-        homework TEXT DEFAULT '',
-        PRIMARY KEY (student_id, date)
     )
-"""
-)
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    st.error(f"Ошибка подключения к облачной базе: {e}")
 
-st.title("📚 Журнал посещаемости репетитора (Cloud Edition)")
+
+init_db()
+
+# --- Инициализация локального буфера в st.session_state ---
+if "buffer_loaded" not in st.session_state:
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, name, surname, grade FROM students")
+    st.session_state["buf_students"] = cursor.fetchall()
+
+    cursor.execute(
+        "SELECT student_id, date, status, paid, lesson_exists, homework FROM attendance"
+    )
+    att_rows = cursor.fetchall()
+
+    st.session_state["buf_attendance"] = {}
+    for sid, d_str, stat, paid, l_exists, hw in att_rows:
+      st.session_state["buf_attendance"][(sid, d_str)] = {
+          "status": stat,
+          "paid": paid,
+          "lesson_exists": l_exists,
+          "homework": hw,
+      }
+
+    cursor.close()
+    conn.close()
+    st.session_state["buffer_loaded"] = True
+    st.session_state["has_unsaved_changes"] = False
+  except Exception as e:
+    st.error(f"Не удалось загрузить данные из облака: {e}")
+    st.session_state["buf_students"] = []
+    st.session_state["buf_attendance"] = {}
+
+st.title("📚 Журнал репетитора (Буферный режим)")
+
+# --- Кнопка синхронизации с облаком ---
+st.sidebar.header("☁️ Синхронизация с облаком")
+has_changes = st.session_state.get("has_unsaved_changes", False)
+
+if has_changes:
+  st.sidebar.warning("⚠️ Есть несохраненные изменения в буфере!")
+
+  # JavaScript-код для предупреждения при закрытии вкладки
+  import streamlit.components.v1 as components
+
+  components.html(
+      """
+        <script>
+            window.addEventListener('beforeunload', function (e) {
+                e.preventDefault();
+                e.returnValue = '';
+            });
+        </script>
+    """,
+      height=0,
+  )
+else:
+  st.sidebar.success("✅ Все изменения синхронизированы")
+
+if st.sidebar.button(
+    "💾 Сохранить в облако", type="primary", use_container_width=True
+):
+  with st.spinner("Загрузка данных в Supabase..."):
+    try:
+      conn = get_db_connection()
+      conn.autocommit = True
+      cursor = conn.cursor()
+
+      cursor.execute("DELETE FROM attendance")
+      cursor.execute("DELETE FROM students")
+
+      for sid, name, surname, grade in st.session_state["buf_students"]:
+        cursor.execute(
+            "INSERT INTO students (id, name, surname, grade) VALUES (%s, %s, %s,"
+            " %s)",
+            (sid, name, surname, grade),
+        )
+
+      for (sid, d_str), data in st.session_state["buf_attendance"].items():
+        cursor.execute(
+            """
+                INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                sid,
+                d_str,
+                data["status"],
+                data["paid"],
+                data["lesson_exists"],
+                data["homework"],
+            ),
+        )
+
+      cursor.close()
+      conn.close()
+      st.session_state["has_unsaved_changes"] = False
+      st.sidebar.success("Успешно сохранено в облако!")
+      st.rerun()
+    except Exception as e:
+      st.sidebar.error(f"Ошибка сохранения: {e}")
+
+if st.sidebar.button("🔄 Вернуться к облачным данным", use_container_width=True):
+  for k in [
+      "buffer_loaded",
+      "has_unsaved_changes",
+      "buf_students",
+      "buf_attendance",
+  ]:
+    if k in st.session_state:
+      del st.session_state[k]
+  st.rerun()
 
 
 def extract_grade_num(grade_str):
@@ -88,10 +202,10 @@ def extract_grade_num(grade_str):
   return match.group(0) if match else grade_str
 
 
-cursor.execute("SELECT id, name, surname, grade FROM students")
-all_students = cursor.fetchall()
+all_students = st.session_state["buf_students"]
 
-# --- Боковая панель: Управление учениками ---
+# --- Боковая панель: Управление учениками (в буфере) ---
+st.sidebar.divider()
 st.sidebar.header("Управление учениками")
 
 with st.sidebar.form("add_student_form", clear_on_submit=True):
@@ -103,15 +217,20 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
   submitted = st.form_submit_button("Добавить")
   if submitted:
     if f_name.strip() and f_surname.strip() and f_grade.strip():
-      cursor.execute(
-          "INSERT INTO students (name, surname, grade) VALUES (%s, %s, %s)",
-          (
-              f_name.strip(),
-              f_surname.strip(),
-              f_grade.strip(),
-          ),
+      max_id = (
+          max([s[0] for s in st.session_state["buf_students"]])
+          if st.session_state["buf_students"]
+          else 0
       )
-      st.sidebar.success(f"Ученик {f_name} {f_surname} добавлен!")
+      new_id = max_id + 1
+      st.session_state["buf_students"].append(
+          (new_id, f_name.strip(), f_surname.strip(), f_grade.strip())
+      )
+      st.session_state["has_unsaved_changes"] = True
+      st.sidebar.success(
+          f"Ученик {f_name} {f_surname} добавлен в буфер! (Не забудьте"
+          " сохранить)"
+      )
       st.rerun()
     else:
       st.sidebar.error("Все поля обязательны для заполнения!")
@@ -122,7 +241,7 @@ for sid, name, surname, grade in all_students:
   display_name = f"{surname} {name}{grade_str}"
   all_student_dict[display_name] = sid
 
-# --- Красивая легенда в боковой панели ---
+# --- Легенда ---
 st.sidebar.divider()
 st.sidebar.markdown("""
 ### 📌 Легенда
@@ -172,7 +291,6 @@ with f_col3:
 st.divider()
 
 
-# Функция формирования строки из 3 эмодзи
 def build_emoji_string(stat, paid, hw):
   if stat == "Присутствовал":
     p_emoji = "🟢"
@@ -189,64 +307,38 @@ def build_emoji_string(stat, paid, hw):
   return f"{p_emoji} {pay_emoji} {hw_emoji}"
 
 
-# --- Встроенное модальное окно Streamlit для удаления ---
 @st.dialog("🗑️ Подтверждение удаления")
 def delete_student_dialog(student_id, student_fullname):
   st.warning(
-      f"Вы действительно хотите удалить ученика **{student_fullname}**?"
-      " Вся история посещений и оплат будет удалена."
+      f"Вы действительно хотите удалить ученика **{student_fullname}** из буфера?"
   )
   col_yes, col_no = st.columns(2)
   with col_yes:
     if st.button("Да, удалить", type="primary", use_container_width=True):
-      cursor.execute("DELETE FROM students WHERE id = %s", (student_id,))
-      st.success("Ученик успешно удален!")
+      st.session_state["buf_students"] = [
+          s for s in st.session_state["buf_students"] if s[0] != student_id
+      ]
+      st.session_state["buf_attendance"] = {
+          k: v
+          for k, v in st.session_state["buf_attendance"].items()
+          if k[0] != student_id
+      }
+      st.session_state["has_unsaved_changes"] = True
+      st.success("Ученик удален из буфера!")
       st.rerun()
   with col_no:
     if st.button("Отмена", use_container_width=True):
       st.rerun()
 
 
-# --- Основной экран: Таблица посещаемости ---
+# --- Основной экран: Таблица посещаемости (по буферу) ---
 if all_student_dict and start_date <= end_date:
   date_range = [
       (start_date + timedelta(days=i)).strftime("%Y-%m-%d")
       for i in range((end_date - start_date).days + 1)
   ]
 
-  cursor.execute(
-      """
-        SELECT s.id, s.name, s.surname, s.grade, a.date, a.status, a.paid, a.lesson_exists, a.homework 
-        FROM students s
-        LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN %s AND %s
-    """,
-      (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
-  )
-  records = cursor.fetchall()
-
   table_data = {}
-  for sid, name, surname, grade, d_str, stat, paid, l_exists, hw in records:
-    g_num = extract_grade_num(grade)
-    if (
-        filter_grade != "Все классы"
-        and g_num != filter_grade
-        and grade != filter_grade
-    ):
-      continue
-
-    full_name = f"{surname} {name}" + (
-        f" [{grade}]" if grade and grade != "-" else ""
-    )
-    if full_name not in table_data:
-      table_data[full_name] = {
-          pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
-      }
-
-    if d_str and l_exists == 1:
-      formatted_d = pd.to_datetime(d_str).strftime("%d.%m")
-      if full_name in table_data and formatted_d in table_data[full_name]:
-        table_data[full_name][formatted_d] = build_emoji_string(stat, paid, hw)
-
   for sid, name, surname, grade in all_students:
     g_num = extract_grade_num(grade)
     if (
@@ -255,26 +347,34 @@ if all_student_dict and start_date <= end_date:
         and grade != filter_grade
     ):
       continue
+
     full_name = f"{surname} {name}" + (
         f" [{grade}]" if grade and grade != "-" else ""
     )
-    if full_name not in table_data:
-      table_data[full_name] = {
-          pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
-      }
+    table_data[full_name] = {
+        pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
+    }
+
+    for d_str in date_range:
+      att_data = st.session_state["buf_attendance"].get((sid, d_str))
+      if att_data and att_data["lesson_exists"] == 1:
+        formatted_d = pd.to_datetime(d_str).strftime("%d.%m")
+        if formatted_d in table_data[full_name]:
+          table_data[full_name][formatted_d] = build_emoji_string(
+              att_data["status"], att_data["paid"], att_data["homework"]
+          )
 
   df = pd.DataFrame.from_dict(table_data, orient="index")
   if not df.empty:
     df = df.sort_index()
 
     st.markdown(
-        "💡 *Таблица служит для демонстрации информации. Управление учениками,"
-        " посещаемостью и оплатой производится через карточку ниже.*"
+        "💡 *Таблица показывает данные из локального буфера. Изменения"
+        " сохраняются кнопкой слева.*"
     )
-
     st.dataframe(df, use_container_width=True)
 
-    # --- Карточка ученика под таблицей ---
+    # --- Карточка ученика ---
     st.divider()
     st.subheader("📋 Карточка ученика и управление занятием")
 
@@ -296,12 +396,9 @@ if all_student_dict and start_date <= end_date:
           break
 
       if selected_sid:
-        cursor.execute(
-            "SELECT id, name, surname, grade FROM students WHERE id = %s",
-            (selected_sid,),
+        s_data = next(
+            (s for s in all_students if s[0] == selected_sid), None
         )
-        s_data = cursor.fetchone()
-
         if s_data:
           _, s_name, s_surname, s_grade = s_data
 
@@ -322,135 +419,74 @@ if all_student_dict and start_date <= end_date:
               )
 
               lesson_date = st.date_input(
-                  "Дата урока для настройки", value=date.today(), key="card_date"
+                  "Дата урока для настройки",
+                  value=date.today(),
+                  key=f"card_date_{selected_sid}",
               )
               lesson_date_str = lesson_date.strftime("%Y-%m-%d")
 
               state_init_key = f"init_{selected_sid}_{lesson_date_str}"
               if state_init_key not in st.session_state:
-                cursor.execute(
-                    "SELECT status, paid, lesson_exists, homework FROM"
-                    " attendance WHERE student_id = %s AND date = %s",
-                    (selected_sid, lesson_date_str),
+                att_record = st.session_state["buf_attendance"].get(
+                    (selected_sid, lesson_date_str), {}
                 )
-                att_record = cursor.fetchone()
-                st.session_state[f"les_exist_{selected_sid}"] = (
-                    bool(att_record[2])
-                    if att_record and att_record[2] == 1
-                    else False
+                st.session_state[f"les_exist_{selected_sid}"] = bool(
+                    att_record.get("lesson_exists", 0)
                 )
-                st.session_state[f"status_sel_{selected_sid}"] = (
-                    att_record[0] if att_record and att_record[0] else ""
+                st.session_state[f"status_sel_{selected_sid}"] = att_record.get(
+                    "status", ""
                 )
-                st.session_state[f"paid_chk_{selected_sid}"] = (
-                    bool(att_record[1])
-                    if att_record and att_record[1] == 1
-                    else False
+                st.session_state[f"paid_chk_{selected_sid}"] = bool(
+                    att_record.get("paid", 0)
                 )
-                st.session_state[f"hw_txt_{selected_sid}"] = (
-                    att_record[3] if att_record and att_record[3] else ""
+                st.session_state[f"hw_txt_{selected_sid}"] = att_record.get(
+                    "homework", ""
                 )
                 st.session_state[state_init_key] = True
 
-              current_status = st.session_state.get(
-                  f"status_sel_{selected_sid}", ""
-              )
-              current_paid_val = (
-                  1
-                  if st.session_state.get(f"paid_chk_{selected_sid}", False)
-                  else 0
-              )
-              current_hw_val = st.session_state.get(
-                  f"hw_txt_{selected_sid}", ""
-              )
 
+              def update_buffer_data():
+                l_exists = (
+                    1
+                    if st.session_state.get(f"les_exist_{selected_sid}")
+                    else 0
+                )
+                stat = st.session_state.get(
+                    f"status_sel_{selected_sid}", ""
+                )
+                paid = (
+                    1 if st.session_state.get(f"paid_chk_{selected_sid}") else 0
+                )
+                hw = st.session_state.get(f"hw_txt_{selected_sid}", "")
 
-              # --- Функции автосохранения в PostgreSQL ---
-              def toggle_lesson_exists_callback():
-                val = 1 if st.session_state[f"les_exist_{selected_sid}"] else 0
-                if val == 1:
-                  cursor.execute(
-                      """
-                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
-                                        VALUES (%s, %s, '', 0, 1, '')
-                                        ON CONFLICT (student_id, date) DO UPDATE SET lesson_exists=1
-                                    """,
-                      (selected_sid, lesson_date_str),
-                  )
+                if (
+                    l_exists == 0
+                    and not stat
+                    and paid == 0
+                    and not hw.strip()
+                ):
+                  if (selected_sid, lesson_date_str) in st.session_state[
+                      "buf_attendance"
+                  ]:
+                    del st.session_state["buf_attendance"][
+                        (selected_sid, lesson_date_str)
+                    ]
                 else:
-                  cursor.execute(
-                      """
-                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
-                                        VALUES (%s, %s, '', 0, 0, '')
-                                        ON CONFLICT (student_id, date) DO UPDATE SET lesson_exists=0, status='', paid=0, homework=''
-                                    """,
-                      (selected_sid, lesson_date_str),
-                  )
-                  st.session_state[f"status_sel_{selected_sid}"] = ""
-                  st.session_state[f"paid_chk_{selected_sid}"] = False
-                  st.session_state[f"hw_txt_{selected_sid}"] = ""
-
-
-              def update_status_callback():
-                new_stat = st.session_state[f"status_sel_{selected_sid}"]
-                cursor.execute(
-                    """
-                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
-                                    VALUES (%s, %s, %s, %s, 1, %s)
-                                    ON CONFLICT (student_id, date) DO UPDATE SET status=EXCLUDED.status, lesson_exists=1
-                                """,
-                    (
-                        selected_sid,
-                        lesson_date_str,
-                        new_stat,
-                        current_paid_val,
-                        current_hw_val,
-                    ),
-                )
-
-
-              def update_paid_callback():
-                new_p = (
-                    1 if st.session_state[f"paid_chk_{selected_sid}"] else 0
-                )
-                cursor.execute(
-                    """
-                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
-                                    VALUES (%s, %s, %s, %s, 1, %s)
-                                    ON CONFLICT (student_id, date) DO UPDATE SET paid=EXCLUDED.paid, lesson_exists=1
-                                """,
-                    (
-                        selected_sid,
-                        lesson_date_str,
-                        current_status,
-                        new_p,
-                        current_hw_val,
-                    ),
-                )
-
-
-              def update_hw_callback():
-                new_hw = st.session_state[f"hw_txt_{selected_sid}"]
-                cursor.execute(
-                    """
-                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
-                                    VALUES (%s, %s, %s, %s, 1, %s)
-                                    ON CONFLICT (student_id, date) DO UPDATE SET homework=EXCLUDED.homework, lesson_exists=1
-                                """,
-                    (
-                        selected_sid,
-                        lesson_date_str,
-                        current_status,
-                        current_paid_val,
-                        new_hw,
-                    ),
-                )
+                  st.session_state["buf_attendance"][
+                      (selected_sid, lesson_date_str)
+                  ] = {
+                      "status": stat,
+                      "paid": paid,
+                      "lesson_exists": l_exists,
+                      "homework": hw,
+                  }
+                st.session_state["has_unsaved_changes"] = True
 
 
               lesson_exists_toggle = st.checkbox(
                   "Урок есть",
                   key=f"les_exist_{selected_sid}",
-                  on_change=toggle_lesson_exists_callback,
+                  on_change=update_buffer_data,
               )
 
               if lesson_exists_toggle:
@@ -475,22 +511,23 @@ if all_student_dict and start_date <= end_date:
                     status_options,
                     index=default_idx,
                     key=f"status_sel_{selected_sid}",
-                    on_change=update_status_callback,
+                    on_change=update_buffer_data,
                 )
 
                 st.checkbox(
                     "Оплата получена",
                     key=f"paid_chk_{selected_sid}",
-                    on_change=update_paid_callback,
+                    on_change=update_buffer_data,
                 )
 
                 st.text_area(
                     "Текущее домашнее задание",
                     key=f"hw_txt_{selected_sid}",
-                    on_change=update_hw_callback,
+                    on_change=update_buffer_data,
                 )
                 st.markdown(
-                    "💡 *Данные синхронизируются с облачной базой данных.*"
+                    "💡 *Изменения записаны в буфер. Не забудьте нажать кнопку"
+                    " «Сохранить в облако» слева.*"
                 )
 
               st.divider()
@@ -529,21 +566,30 @@ if all_student_dict and start_date <= end_date:
                       and new_surname.strip()
                       and new_grade.strip()
                   ):
-                    cursor.execute(
-                        """
-                                          UPDATE students 
-                                          SET name = %s, surname = %s, grade = %s 
-                                          WHERE id = %s
-                                      """,
+                    st.session_state["buf_students"] = [
                         (
-                            new_name.strip(),
-                            new_surname.strip(),
-                            new_grade.strip(),
-                            selected_sid,
-                        ),
-                    )
+                            s[0],
+                            (
+                                new_name.strip()
+                                if s[0] == selected_sid
+                                else s[1]
+                            ),
+                            (
+                                new_surname.strip()
+                                if s[0] == selected_sid
+                                else s[2]
+                            ),
+                            (
+                                new_grade.strip()
+                                if s[0] == selected_sid
+                                else s[3]
+                            ),
+                        )
+                        for s in st.session_state["buf_students"]
+                    ]
+                    st.session_state["has_unsaved_changes"] = True
                     st.session_state[edit_mode_key] = False
-                    st.success("Данные ученика обновлены!")
+                    st.success("Данные ученика обновлены в буфере!")
                     st.rerun()
                   else:
                     st.error("Все поля должны быть заполнены.")
@@ -579,56 +625,27 @@ if st.sidebar.button("📥 Скачать Excel отчёт"):
         for i in range((export_end - export_start).days + 1)
     ]
 
-    cursor.execute(
-        """
-            SELECT s.id, s.name, s.surname, s.grade, a.date, a.status, a.paid, a.lesson_exists, a.homework 
-            FROM students s
-            LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN %s AND %s
-        """,
-        (
-            export_start.strftime("%Y-%m-%d"),
-            export_end.strftime("%Y-%m-%d"),
-        ),
-    )
-    exp_records = cursor.fetchall()
-
     exp_table_data = {}
-    for sid, name, surname, grade, d_str, stat, paid, l_exists, hw in exp_records:
-      full_name = f"{surname} {name}" + (
-          f" [{grade}]" if grade and grade != "-" else ""
-      )
-      if full_name not in exp_table_data:
-        exp_table_data[full_name] = {
-            pd.to_datetime(d).strftime("%d.%m"): "" for d in exp_date_range
-        }
-
-      if d_str and l_exists == 1:
-        formatted_d = pd.to_datetime(d_str).strftime("%d.%m")
-        if (
-            full_name in exp_table_data
-            and formatted_d in exp_table_data[full_name]
-        ):
-          exp_table_data[full_name][formatted_d] = build_emoji_string(
-              stat, paid, hw
-          )
-
     for sid, name, surname, grade in all_students:
       full_name = f"{surname} {name}" + (
           f" [{grade}]" if grade and grade != "-" else ""
       )
-      if full_name not in exp_table_data:
-        exp_table_data[full_name] = {
-            pd.to_datetime(d).strftime("%d.%m"): "" for d in exp_date_range
-        }
+      exp_table_data[full_name] = {
+          pd.to_datetime(d).strftime("%d.%m"): "" for d in exp_date_range
+      }
 
-    exp_flat_data = {}
-    for fn, dates_dict in exp_table_data.items():
-      exp_flat_data[fn] = dates_dict
+      for d_str in exp_date_range:
+        att_data = st.session_state["buf_attendance"].get((sid, d_str))
+        if att_data and att_data["lesson_exists"] == 1:
+          formatted_d = pd.to_datetime(d_str).strftime("%d.%m")
+          if formatted_d in exp_table_data[full_name]:
+            exp_table_data[full_name][formatted_d] = build_emoji_string(
+                att_data["status"], att_data["paid"], att_data["homework"]
+            )
 
-    exp_df = pd.DataFrame.from_dict(exp_flat_data, orient="index")
+    exp_df = pd.DataFrame.from_dict(exp_table_data, orient="index")
     if not exp_df.empty:
       exp_df = exp_df.sort_index()
-
       exp_df = exp_df.reset_index()
       exp_df.rename(columns={"index": "Ученик"}, inplace=True)
 
