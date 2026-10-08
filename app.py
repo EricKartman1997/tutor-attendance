@@ -8,7 +8,7 @@ import streamlit as st
 
 # --- Настройка страницы ---
 st.set_page_config(
-    page_title="Для моей Солнышки", page_icon="📚", layout="wide"
+    page_title="Для моего Солнышка", page_icon="📚", layout="wide"
 )
 
 # --- CSS-стили для интерфейса ---
@@ -31,7 +31,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Имя локальной базы-буфера
 LOCAL_DB = "local_tutor.db"
 
 
@@ -131,7 +130,6 @@ def pull_from_cloud():
     return False
 
 
-# Первичный запуск: если локальный буфер пустой, подтягиваем данные из облака
 if "db_initialized" not in st.session_state:
   l_conn = get_local_connection()
   cursor = l_conn.cursor()
@@ -145,7 +143,7 @@ if "db_initialized" not in st.session_state:
   st.session_state["db_initialized"] = True
   st.session_state["has_unsaved_changes"] = False
 
-st.title("📚 Журнал English Dream (Версия: SQLite Buffer Mode)")
+st.title("📚 Журнал English Dream (SQLite Buffer Mode)")
 
 # --- Боковая панель: Синхронизация ---
 st.sidebar.header("☁️ Синхронизация с облаком")
@@ -233,7 +231,6 @@ def extract_grade_num(grade_str):
   return match.group(0) if match else grade_str
 
 
-# Получение списка учеников из локального SQLite
 def get_all_students_local():
   l_conn = get_local_connection()
   cursor = l_conn.cursor()
@@ -287,7 +284,6 @@ today = date.today()
 monday = today - timedelta(days=today.weekday())
 sunday = monday + timedelta(days=6)
 
-# Формируем список вариантов для фильтра по классу, включая "-"
 has_no_grade = any(s["grade"] == "-" for s in all_students)
 all_grade_nums = sorted(
     list(
@@ -350,7 +346,6 @@ def delete_student_dialog(student_id, student_fullname):
       st.rerun()
 
 
-# Получение посещаемости из локальной SQLite
 def get_local_attendance():
   l_conn = get_local_connection()
   cursor = l_conn.cursor()
@@ -380,7 +375,6 @@ if all_student_dict and start_date <= end_date:
   for s in all_students:
     g_num = extract_grade_num(s["grade"])
 
-    # Логика фильтрации по классу (учитываем дефис)
     if filter_grade != "Все классы":
       if filter_grade == "-" and s["grade"] != "-":
         continue
@@ -451,26 +445,39 @@ if all_student_dict and start_date <= end_date:
           )
           lesson_date_str = lesson_date.strftime("%Y-%m-%d")
 
-          att_record = local_attendance.get(
+          # Точечный запрос из базы для конкретной даты
+          l_conn_single = get_local_connection()
+          cursor_single = l_conn_single.cursor()
+          cursor_single.execute(
+              "SELECT student_id, date, status, paid, lesson_exists, homework FROM attendance WHERE student_id = ? AND date = ?",
               (selected_sid, lesson_date_str),
-              {
+          )
+          single_row = cursor_single.fetchone()
+          l_conn_single.close()
+
+          att_record = (
+              dict(single_row)
+              if single_row
+              else {
                   "lesson_exists": 0,
                   "status": "",
                   "paid": 0,
                   "homework": "",
-              },
+              }
           )
+
+          # Уникальные ключи виджетов с привязкой к дате, чтобы они обновлялись при её смене
+          w_key_les = f"les_exist_{selected_sid}_{lesson_date_str}"
+          w_key_stat = f"status_sel_{selected_sid}_{lesson_date_str}"
+          w_key_paid = f"paid_chk_{selected_sid}_{lesson_date_str}"
+          w_key_hw = f"hw_txt_{selected_sid}_{lesson_date_str}"
 
 
           def save_to_sqlite():
-            l_exists = (
-                1 if st.session_state.get(f"les_exist_{selected_sid}") else 0
-            )
-            stat = st.session_state.get(f"status_sel_{selected_sid}", "")
-            paid = (
-                1 if st.session_state.get(f"paid_chk_{selected_sid}") else 0
-            )
-            hw = st.session_state.get(f"hw_txt_{selected_sid}", "")
+            l_exists = 1 if st.session_state.get(w_key_les) else 0
+            stat = st.session_state.get(w_key_stat, "")
+            paid = 1 if st.session_state.get(w_key_paid) else 0
+            hw = st.session_state.get(w_key_hw, "")
 
             l_conn = get_local_connection()
             cursor = l_conn.cursor()
@@ -500,7 +507,7 @@ if all_student_dict and start_date <= end_date:
           lesson_exists_toggle = st.checkbox(
               "Урок есть",
               value=bool(att_record["lesson_exists"]),
-              key=f"les_exist_{selected_sid}",
+              key=w_key_les,
               on_change=save_to_sqlite,
           )
 
@@ -523,19 +530,19 @@ if all_student_dict and start_date <= end_date:
                 "Посещаемость",
                 status_options,
                 index=idx,
-                key=f"status_sel_{selected_sid}",
+                key=w_key_stat,
                 on_change=save_to_sqlite,
             )
             st.checkbox(
                 "Оплата получена",
                 value=bool(att_record["paid"]),
-                key=f"paid_chk_{selected_sid}",
+                key=w_key_paid,
                 on_change=save_to_sqlite,
             )
             st.text_area(
                 "Домашнее задание",
                 value=att_record["homework"],
-                key=f"hw_txt_{selected_sid}",
+                key=w_key_hw,
                 on_change=save_to_sqlite,
             )
 
