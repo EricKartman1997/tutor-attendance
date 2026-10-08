@@ -438,8 +438,8 @@ st.sidebar.markdown("""
 - 🟡 — отменил заранее
 - 🔴 — несвоевременно
 - 🔘 — не заполнено
-- 💰 — оплачено
-- ⛔ — не оплачено
+- ✅ — оплачено 
+- ❌ — не оплачено
 - 📘 — ДЗ заполнено
 - 📕 — ДЗ пусто
 """)
@@ -455,7 +455,7 @@ def build_emoji_string(stat, paid, hw):
           else "🔴" if stat == "Несвоевременно отменил" else "🔘"
       )
   )
-  pay_emoji = "💰" if paid == 1 else "⛔"
+  pay_emoji = "✅" if paid == 1 else "❌"
   hw_emoji = "📘" if (hw and hw.strip()) else "📕"
   return f"{p_emoji} {pay_emoji} {hw_emoji}"
 
