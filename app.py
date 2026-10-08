@@ -1,7 +1,8 @@
 from datetime import date, timedelta
+import os
 import re
-import sqlite3
 import pandas as pd
+import psycopg2
 import streamlit as st
 
 # --- Настройка страницы ---
@@ -30,14 +31,32 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- Инициализация базы данных ---
-conn = sqlite3.connect("tutor.db", check_same_thread=False)
+
+# --- Подключение к облачной базе данных Supabase (PostgreSQL) ---
+# На продакшене (Streamlit Cloud) строка берется из st.secrets["DATABASE_URL"]
+# Для локального теста можете временно заменить на вашу строку из Supabase:
+# "postgresql://postgres:ваш_пароль@db.xxxx.supabase.co:5432/postgres"
+def get_db_connection():
+  try:
+    db_url = st.secrets["DATABASE_URL"]
+  except Exception:
+    # Запасной вариант для локального запуска (вставьте сюда свою строку из Supabase)
+    db_url = os.getenv(
+        "DATABASE_URL", "postgresql://postgres.doqhdknjzfrtekrwoqnk:VWRKnSLy4N5rXVHp@aws-1-eu-west-3.pooler.supabase.com:5432/postgres"
+    )
+
+  return psycopg2.connect(db_url)
+
+
+conn = get_db_connection()
+conn.autocommit = True
 cursor = conn.cursor()
 
+# Проверка и создание таблиц в PostgreSQL (если их еще нет)
 cursor.execute(
     """
     CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT,
         surname TEXT,
         grade TEXT
@@ -48,35 +67,18 @@ cursor.execute(
 cursor.execute(
     """
     CREATE TABLE IF NOT EXISTS attendance (
-        student_id INTEGER,
+        student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
         date TEXT,
         status TEXT,
         paid INTEGER DEFAULT 0,
         lesson_exists INTEGER DEFAULT 0,
         homework TEXT DEFAULT '',
-        PRIMARY KEY (student_id, date),
-        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+        PRIMARY KEY (student_id, date)
     )
 """
 )
 
-cursor.execute("PRAGMA table_info(attendance)")
-att_columns = [col[1] for col in cursor.fetchall()]
-if "paid" not in att_columns:
-  cursor.execute("ALTER TABLE attendance ADD COLUMN paid INTEGER DEFAULT 0")
-  conn.commit()
-if "lesson_exists" not in att_columns:
-  cursor.execute(
-      "ALTER TABLE attendance ADD COLUMN lesson_exists INTEGER DEFAULT 0"
-  )
-  conn.commit()
-if "homework" not in att_columns:
-  cursor.execute(
-      "ALTER TABLE attendance ADD COLUMN homework TEXT DEFAULT ''"
-  )
-  conn.commit()
-
-st.title("📚 Журнал посещаемости репетитора")
+st.title("📚 Журнал посещаемости репетитора (Cloud Edition)")
 
 
 def extract_grade_num(grade_str):
@@ -102,14 +104,13 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
   if submitted:
     if f_name.strip() and f_surname.strip() and f_grade.strip():
       cursor.execute(
-          "INSERT INTO students (name, surname, grade) VALUES (?, ?, ?)",
+          "INSERT INTO students (name, surname, grade) VALUES (%s, %s, %s)",
           (
               f_name.strip(),
               f_surname.strip(),
               f_grade.strip(),
           ),
       )
-      conn.commit()
       st.sidebar.success(f"Ученик {f_name} {f_surname} добавлен!")
       st.rerun()
     else:
@@ -188,7 +189,7 @@ def build_emoji_string(stat, paid, hw):
   return f"{p_emoji} {pay_emoji} {hw_emoji}"
 
 
-# --- Встроенное официальное модальное окно Streamlit для удаления ---
+# --- Встроенное модальное окно Streamlit для удаления ---
 @st.dialog("🗑️ Подтверждение удаления")
 def delete_student_dialog(student_id, student_fullname):
   st.warning(
@@ -198,9 +199,7 @@ def delete_student_dialog(student_id, student_fullname):
   col_yes, col_no = st.columns(2)
   with col_yes:
     if st.button("Да, удалить", type="primary", use_container_width=True):
-      cursor.execute("DELETE FROM students WHERE id = ?", (student_id,))
-      cursor.execute("DELETE FROM attendance WHERE student_id = ?", (student_id,))
-      conn.commit()
+      cursor.execute("DELETE FROM students WHERE id = %s", (student_id,))
       st.success("Ученик успешно удален!")
       st.rerun()
   with col_no:
@@ -208,7 +207,7 @@ def delete_student_dialog(student_id, student_fullname):
       st.rerun()
 
 
-# --- Основной экран: Таблица посещаемости (Только для демонстрации) ---
+# --- Основной экран: Таблица посещаемости ---
 if all_student_dict and start_date <= end_date:
   date_range = [
       (start_date + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -219,7 +218,7 @@ if all_student_dict and start_date <= end_date:
       """
         SELECT s.id, s.name, s.surname, s.grade, a.date, a.status, a.paid, a.lesson_exists, a.homework 
         FROM students s
-        LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN ? AND ?
+        LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN %s AND %s
     """,
       (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
   )
@@ -298,7 +297,7 @@ if all_student_dict and start_date <= end_date:
 
       if selected_sid:
         cursor.execute(
-            "SELECT id, name, surname, grade FROM students WHERE id = ?",
+            "SELECT id, name, surname, grade FROM students WHERE id = %s",
             (selected_sid,),
         )
         s_data = cursor.fetchone()
@@ -327,12 +326,11 @@ if all_student_dict and start_date <= end_date:
               )
               lesson_date_str = lesson_date.strftime("%Y-%m-%d")
 
-              # Проверяем, менялся ли ученик или дата, чтобы инициализировать state из базы
               state_init_key = f"init_{selected_sid}_{lesson_date_str}"
               if state_init_key not in st.session_state:
                 cursor.execute(
                     "SELECT status, paid, lesson_exists, homework FROM"
-                    " attendance WHERE student_id = ? AND date = ?",
+                    " attendance WHERE student_id = %s AND date = %s",
                     (selected_sid, lesson_date_str),
                 )
                 att_record = cursor.fetchone()
@@ -354,7 +352,6 @@ if all_student_dict and start_date <= end_date:
                 )
                 st.session_state[state_init_key] = True
 
-              # Получаем текущие переменные из session_state для логики сохранения
               current_status = st.session_state.get(
                   f"status_sel_{selected_sid}", ""
               )
@@ -368,38 +365,39 @@ if all_student_dict and start_date <= end_date:
               )
 
 
-              # --- Функции автосохранения на лету ---
+              # --- Функции автосохранения в PostgreSQL ---
               def toggle_lesson_exists_callback():
                 val = 1 if st.session_state[f"les_exist_{selected_sid}"] else 0
                 if val == 1:
                   cursor.execute(
                       """
-                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) VALUES (?, ?, '', 0, 1, '')
-                                        ON CONFLICT(student_id, date) DO UPDATE SET lesson_exists=1
+                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
+                                        VALUES (%s, %s, '', 0, 1, '')
+                                        ON CONFLICT (student_id, date) DO UPDATE SET lesson_exists=1
                                     """,
                       (selected_sid, lesson_date_str),
                   )
                 else:
                   cursor.execute(
                       """
-                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) VALUES (?, ?, '', 0, 0, '')
-                                        ON CONFLICT(student_id, date) DO UPDATE SET lesson_exists=0, status='', paid=0, homework=''
+                                        INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
+                                        VALUES (%s, %s, '', 0, 0, '')
+                                        ON CONFLICT (student_id, date) DO UPDATE SET lesson_exists=0, status='', paid=0, homework=''
                                     """,
                       (selected_sid, lesson_date_str),
                   )
-                  # Также сбрасываем локальные стейты для полей
                   st.session_state[f"status_sel_{selected_sid}"] = ""
                   st.session_state[f"paid_chk_{selected_sid}"] = False
                   st.session_state[f"hw_txt_{selected_sid}"] = ""
-                conn.commit()
 
 
               def update_status_callback():
                 new_stat = st.session_state[f"status_sel_{selected_sid}"]
                 cursor.execute(
                     """
-                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) VALUES (?, ?, ?, ?, 1, ?)
-                                    ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status, lesson_exists=1
+                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
+                                    VALUES (%s, %s, %s, %s, 1, %s)
+                                    ON CONFLICT (student_id, date) DO UPDATE SET status=EXCLUDED.status, lesson_exists=1
                                 """,
                     (
                         selected_sid,
@@ -409,7 +407,6 @@ if all_student_dict and start_date <= end_date:
                         current_hw_val,
                     ),
                 )
-                conn.commit()
 
 
               def update_paid_callback():
@@ -418,8 +415,9 @@ if all_student_dict and start_date <= end_date:
                 )
                 cursor.execute(
                     """
-                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) VALUES (?, ?, ?, ?, 1, ?)
-                                    ON CONFLICT(student_id, date) DO UPDATE SET paid=excluded.paid, lesson_exists=1
+                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
+                                    VALUES (%s, %s, %s, %s, 1, %s)
+                                    ON CONFLICT (student_id, date) DO UPDATE SET paid=EXCLUDED.paid, lesson_exists=1
                                 """,
                     (
                         selected_sid,
@@ -429,15 +427,15 @@ if all_student_dict and start_date <= end_date:
                         current_hw_val,
                     ),
                 )
-                conn.commit()
 
 
               def update_hw_callback():
                 new_hw = st.session_state[f"hw_txt_{selected_sid}"]
                 cursor.execute(
                     """
-                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) VALUES (?, ?, ?, ?, 1, ?)
-                                    ON CONFLICT(student_id, date) DO UPDATE SET homework=excluded.homework, lesson_exists=1
+                                    INSERT INTO attendance (student_id, date, status, paid, lesson_exists, homework) 
+                                    VALUES (%s, %s, %s, %s, 1, %s)
+                                    ON CONFLICT (student_id, date) DO UPDATE SET homework=EXCLUDED.homework, lesson_exists=1
                                 """,
                     (
                         selected_sid,
@@ -447,10 +445,8 @@ if all_student_dict and start_date <= end_date:
                         new_hw,
                     ),
                 )
-                conn.commit()
 
 
-              # Галочка «Урок есть» (работает напрямую через session_state без конфликтов)
               lesson_exists_toggle = st.checkbox(
                   "Урок есть",
                   key=f"les_exist_{selected_sid}",
@@ -465,8 +461,6 @@ if all_student_dict and start_date <= end_date:
                     "Отменил заранее",
                     "Несвоевременно отменил",
                 ]
-
-                # Убедимся, что текущий статус входит в список
                 current_st_val = st.session_state.get(
                     f"status_sel_{selected_sid}", ""
                 )
@@ -496,12 +490,10 @@ if all_student_dict and start_date <= end_date:
                     on_change=update_hw_callback,
                 )
                 st.markdown(
-                    "💡 *Изменения полей сохраняются автоматически для"
-                    " выбранной даты урока.*"
+                    "💡 *Данные синхронизируются с облачной базой данных.*"
                 )
 
               st.divider()
-              # Кнопки управления данными ученика
               col_btn1, _, col_btn2 = st.columns([2, 3, 2])
               with col_btn1:
                 if st.button(
@@ -540,8 +532,8 @@ if all_student_dict and start_date <= end_date:
                     cursor.execute(
                         """
                                           UPDATE students 
-                                          SET name = ?, surname = ?, grade = ? 
-                                          WHERE id = ?
+                                          SET name = %s, surname = %s, grade = %s 
+                                          WHERE id = %s
                                       """,
                         (
                             new_name.strip(),
@@ -550,7 +542,6 @@ if all_student_dict and start_date <= end_date:
                             selected_sid,
                         ),
                     )
-                    conn.commit()
                     st.session_state[edit_mode_key] = False
                     st.success("Данные ученика обновлены!")
                     st.rerun()
@@ -592,7 +583,7 @@ if st.sidebar.button("📥 Скачать Excel отчёт"):
         """
             SELECT s.id, s.name, s.surname, s.grade, a.date, a.status, a.paid, a.lesson_exists, a.homework 
             FROM students s
-            LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN ? AND ?
+            LEFT JOIN attendance a ON s.id = a.student_id AND a.date BETWEEN %s AND %s
         """,
         (
             export_start.strftime("%Y-%m-%d"),
