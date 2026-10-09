@@ -1,0 +1,9 @@
+# Локальные файлы базы данных
+local_tutor.db
+
+# Файлы с секретами и паролями для Streamlit
+.streamlit/secrets.toml
+
+# Системные файлы и кэш Python
+__pycache__/
+.DS_Store
