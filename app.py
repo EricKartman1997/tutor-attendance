@@ -62,6 +62,7 @@ def format_date_with_weekday(d_str_or_date):
   return f"{day_num} {rus_weekday}"
 
 
+# --- Диалоговые окна ---
 @st.dialog("⚠️ Ошибка: Дубликат ученика")
 def duplicate_error_dialog(error_message):
   st.error(error_message)
@@ -72,7 +73,30 @@ def duplicate_error_dialog(error_message):
   if st.button("Понятно", type="primary", use_container_width=True):
     st.rerun()
 
-# --- Подключения (Безопасный вариант без утечки паролей) ---
+
+@st.dialog("🗑️ Подтверждение удаления")
+def delete_student_dialog(student_id, student_fullname):
+  st.warning(f"Удалить ученика **{student_fullname}**?")
+  col_y, col_n = st.columns(2)
+  with col_y:
+    if st.button("Да, удалить", type="primary", use_container_width=True):
+      l_conn = get_local_connection()
+      cursor = l_conn.cursor()
+      cursor.execute("DELETE FROM students WHERE id = ?", (student_id,))
+      cursor.execute(
+          "DELETE FROM attendance WHERE student_id = ?", (student_id,)
+      )
+      l_conn.commit()
+      l_conn.close()
+      st.session_state["has_unsaved_changes"] = True
+      st.success("Ученик удален!")
+      st.rerun()
+  with col_n:
+    if st.button("Отмена", use_container_width=True):
+      st.rerun()
+
+
+# --- Подключения ---
 def get_supabase_connection():
   db_url = os.getenv("DATABASE_URL")
   if not db_url:
@@ -127,7 +151,7 @@ def init_local_db():
 init_local_db()
 
 
-# Базовая функция получения посещаемости (вынесена наверх)
+# Функция получения посещаемости из локальной БД
 def get_local_attendance():
   l_conn = get_local_connection()
   cursor = l_conn.cursor()
@@ -184,12 +208,10 @@ def pull_from_cloud():
     return False
 
 
-# --- Инициализация и обновление локального буфера при старте ---
+# --- Инициализация и очистка локального буфера при старте ---
 if "db_initialized" not in st.session_state:
-  # Создаем таблицы, если их нет
   init_local_db()
 
-  # Принудительно очищаем локальный буфер и скачиваем свежие данные из облака
   l_conn = get_local_connection()
   cursor = l_conn.cursor()
   cursor.execute("DELETE FROM attendance")
@@ -197,7 +219,6 @@ if "db_initialized" not in st.session_state:
   l_conn.commit()
   l_conn.close()
 
-  # Загружаем актуальные данные из Supabase
   pull_from_cloud()
 
   st.session_state["db_initialized"] = True
@@ -288,10 +309,10 @@ def extract_grade_num(grade_str):
   match = re.search(r"\d+", grade_str)
   return match.group(0) if match else grade_str
 
+
 def capitalize_name(text):
   if not text:
     return ""
-  # Каждое слово с большой буквы (на случай двойных имен или фамилий)
   return " ".join([word.capitalize() for word in text.strip().split()])
 
 
@@ -322,7 +343,6 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
       clean_surname = capitalize_name(f_surname)
       clean_grade = f_grade.strip()
 
-      # Проверяем, есть ли уже такой ученик
       l_conn = get_local_connection()
       cursor = l_conn.cursor()
       cursor.execute(
@@ -352,7 +372,7 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
       st.sidebar.error("Заполните все поля!")
 
 
-# --- Функция генерации Excel отчета из SQLite с шапкой периода ---
+# --- Функция генерации Excel отчета из SQLite ---
 def generate_excel_report(start_d, end_d, grade_filter, all_st, local_att):
   output = io.BytesIO()
   date_range = [
@@ -420,7 +440,10 @@ def generate_excel_report(start_d, end_d, grade_filter, all_st, local_att):
 
   with pd.ExcelWriter(output, engine="openpyxl") as writer:
     header_info = pd.DataFrame([
-        ["📅 Отчетный период:", f"{start_d.strftime('%d.%m.%Y')} — {end_d.strftime('%d.%m.%Y')}"],
+        [
+            "📅 Отчетный период:",
+            f"{start_d.strftime('%d.%m.%Y')} — {end_d.strftime('%d.%m.%Y')}",
+        ],
         ["🎓 Класс:", grade_filter],
         [],
     ])
@@ -468,7 +491,7 @@ with f_col3:
 
 st.divider()
 
-# --- Блок отчетов в боковой панели с независимыми датами ---
+# --- Блок отчетов в боковой панели ---
 st.sidebar.divider()
 st.sidebar.header("📊 Отчеты Excel")
 report_start = st.sidebar.date_input(
@@ -478,7 +501,6 @@ report_end = st.sidebar.date_input(
     "По такой период", value=sunday_val, key="rep_end"
 )
 
-# Передаем даты отчета в генератор Excel
 excel_bytes = generate_excel_report(
     report_start, report_end, filter_grade, all_students, get_local_attendance()
 )
@@ -524,27 +546,6 @@ def build_emoji_string(stat, paid, hw):
   pay_emoji = "✅" if paid == 1 else "❌"
   hw_emoji = "📘" if (hw and hw.strip()) else "📕"
   return f"{p_emoji} {pay_emoji} {hw_emoji}"
-
-@st.dialog("🗑️ Подтверждение удаления")
-def delete_student_dialog(student_id, student_fullname):
-  st.warning(f"Удалить ученика **{student_fullname}**?")
-  col_y, col_n = st.columns(2)
-  with col_y:
-    if st.button("Да, удалить", type="primary", use_container_width=True):
-      l_conn = get_local_connection()
-      cursor = l_conn.cursor()
-      cursor.execute("DELETE FROM students WHERE id = ?", (student_id,))
-      cursor.execute(
-          "DELETE FROM attendance WHERE student_id = ?", (student_id,)
-      )
-      l_conn.commit()
-      l_conn.close()
-      st.session_state["has_unsaved_changes"] = True
-      st.success("Ученик удален!")
-      st.rerun()
-  with col_n:
-    if st.button("Отмена", use_container_width=True):
-      st.rerun()
 
 
 def get_current_homework_for_date(student_id, current_date_str):
@@ -715,7 +716,7 @@ if all_student_dict and start_date <= end_date:
 
 
           lesson_exists_toggle = st.checkbox(
-               "Урок есть",
+              "Урок есть",
               value=bool(att_record["lesson_exists"]),
               key=w_key_les,
               on_change=save_to_sqlite,
@@ -796,7 +797,6 @@ if all_student_dict and start_date <= end_date:
                   l_conn = get_local_connection()
                   cursor = l_conn.cursor()
 
-                  # Проверяем, нет ли ДРУГОГО ученика с такими же данными
                   cursor.execute(
                       "SELECT id FROM students WHERE name = ? AND surname = ?"
                       " AND grade = ? AND id != ?",
