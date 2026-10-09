@@ -12,6 +12,26 @@ st.set_page_config(
     page_title="Для моего Солнышка", page_icon="📚", layout="wide"
 )
 
+# --- Авторизация ---
+if "authenticated" not in st.session_state:
+  st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+  st.subheader("🔒 Вход в журнал репетитора")
+  password_input = st.text_input("Введите пароль", type="password")
+  if st.button("Войти", type="primary"):
+    try:
+      correct_password = st.secrets["auth"]["password"]
+    except Exception:
+      correct_password = "admin"  # пароль по умолчанию, если в secrets.toml не задано
+
+    if password_input == correct_password:
+      st.session_state["authenticated"] = True
+      st.rerun()
+    else:
+      st.error("Неверный пароль!")
+  st.stop()
+
 # --- CSS-стили для интерфейса ---
 st.markdown(
     """
