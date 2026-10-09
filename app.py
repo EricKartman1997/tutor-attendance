@@ -61,6 +61,17 @@ def format_date_with_weekday(d_str_or_date):
   rus_weekday = RUS_WEEKDAYS.get(eng_weekday, "")
   return f"{day_num} {rus_weekday}"
 
+
+@st.dialog("⚠️ Ошибка: Дубликат ученика")
+def duplicate_error_dialog(error_message):
+  st.error(error_message)
+  st.write(
+      "Нельзя создать или изменить ученика так, чтобы его данные полностью"
+      " совпадали с другим учеником."
+  )
+  if st.button("Понятно", type="primary", use_container_width=True):
+    st.rerun()
+
 # --- Подключения (Безопасный вариант без утечки паролей) ---
 def get_supabase_connection():
   db_url = os.getenv("DATABASE_URL")
@@ -513,16 +524,6 @@ def build_emoji_string(stat, paid, hw):
   pay_emoji = "✅" if paid == 1 else "❌"
   hw_emoji = "📘" if (hw and hw.strip()) else "📕"
   return f"{p_emoji} {pay_emoji} {hw_emoji}"
-
-@st.dialog("⚠️ Ошибка: Дубликат ученика")
-def duplicate_error_dialog(error_message):
-  st.error(error_message)
-  st.write(
-      "Нельзя создать или изменить ученика так, чтобы его данные полностью"
-      " совпадали с другим учеником."
-  )
-  if st.button("Понятно", type="primary", use_container_width=True):
-    st.rerun()
 
 @st.dialog("🗑️ Подтверждение удаления")
 def delete_student_dialog(student_id, student_fullname):
