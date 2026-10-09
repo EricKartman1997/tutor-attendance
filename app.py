@@ -152,15 +152,21 @@ def pull_from_cloud():
     return False
 
 
+# --- Инициализация и обновление локального буфера при старте ---
 if "db_initialized" not in st.session_state:
+  # Создаем таблицы, если их нет
+  init_local_db()
+
+  # Принудительно очищаем локальный буфер и скачиваем свежие данные из облака
   l_conn = get_local_connection()
   cursor = l_conn.cursor()
-  cursor.execute("SELECT COUNT(*) FROM students")
-  count = cursor.fetchone()[0]
+  cursor.execute("DELETE FROM attendance")
+  cursor.execute("DELETE FROM students")
+  l_conn.commit()
   l_conn.close()
 
-  if count == 0:
-    pull_from_cloud()
+  # Загружаем актуальные данные из Supabase
+  pull_from_cloud()
 
   st.session_state["db_initialized"] = True
   st.session_state["has_unsaved_changes"] = False
