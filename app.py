@@ -40,14 +40,18 @@ st.markdown(
 LOCAL_DB = "local_tutor.db"
 
 
-# --- Подключения ---
+# --- Подключения (Безопасный вариант без утечки паролей) ---
 def get_supabase_connection():
   db_url = os.getenv("DATABASE_URL")
   if not db_url:
     try:
       db_url = st.secrets["DATABASE_URL"]
     except Exception:
-      db_url = "postgresql://postgres.doqhdknjzfrtekrwoqnk:VWRKnSLy4N5rXVHp@aws-1-eu-west-3.pooler.supabase.com:6543/postgres"
+      st.error(
+          "Не найден DATABASE_URL в секретах Streamlit или переменных"
+          " окружения!"
+      )
+      st.stop()
   return psycopg2.connect(db_url)
 
 
@@ -353,9 +357,8 @@ def generate_excel_report(start_d, end_d, grade_filter, all_st, local_att):
 
   with pd.ExcelWriter(output, engine="openpyxl") as writer:
     header_info = pd.DataFrame([
-        ["период с:", start_d.strftime("%d.%m.%Y")],
-        ["по:", end_d.strftime("%d.%m.%Y")],
-        ["Класс:", grade_filter],
+        ["📅 Отчетный период:", f"{start_d.strftime('%d.%m.%Y')} — {end_d.strftime('%d.%m.%Y')}"],
+        ["🎓 Класс:", grade_filter],
         [],
     ])
     header_info.to_excel(
@@ -367,7 +370,7 @@ def generate_excel_report(start_d, end_d, grade_filter, all_st, local_att):
     )
 
     df_excel.to_excel(
-        writer, sheet_name="Журнал репетитора", startrow=4, index=True
+        writer, sheet_name="Журнал репетитора", startrow=3, index=True
     )
 
   return output.getvalue()
@@ -650,7 +653,7 @@ if all_student_dict and start_date <= end_date:
 
 
           lesson_exists_toggle = st.checkbox(
-              "Урок есть",
+               "Урок есть",
               value=bool(att_record["lesson_exists"]),
               key=w_key_les,
               on_change=save_to_sqlite,
@@ -714,7 +717,7 @@ if all_student_dict and start_date <= end_date:
           with st.form(f"edit_form_{selected_sid}"):
             new_name = st.text_input("Имя", value=s_data["name"])
             new_surname = st.text_input("Фамилия", value=s_data["surname"])
-            new_grade = st.text_input("Класс", value=s_data["grade"])
+            new_grade = st.text_input("Class", value=s_data["grade"])
 
             c1, c2 = st.columns(2)
             with c1:
