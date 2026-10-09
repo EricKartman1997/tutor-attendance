@@ -277,6 +277,12 @@ def extract_grade_num(grade_str):
   match = re.search(r"\d+", grade_str)
   return match.group(0) if match else grade_str
 
+def capitalize_name(text):
+  if not text:
+    return ""
+  # Каждое слово с большой буквы (на случай двойных имен или фамилий)
+  return " ".join([word.capitalize() for word in text.strip().split()])
+
 
 def get_all_students_local():
   l_conn = get_local_connection()
@@ -301,17 +307,36 @@ with st.sidebar.form("add_student_form", clear_on_submit=True):
 
   if st.form_submit_button("Добавить"):
     if f_name.strip() and f_surname.strip() and f_grade.strip():
+      clean_name = capitalize_name(f_name)
+      clean_surname = capitalize_name(f_surname)
+      clean_grade = f_grade.strip()
+
+      # Проверяем, есть ли уже такой ученик
       l_conn = get_local_connection()
       cursor = l_conn.cursor()
       cursor.execute(
-          "INSERT INTO students (name, surname, grade) VALUES (?, ?, ?)",
-          (f_name.strip(), f_surname.strip(), f_grade.strip()),
+          "SELECT id FROM students WHERE name = ? AND surname = ? AND grade ="
+          " ?",
+          (clean_name, clean_surname, clean_grade),
       )
-      l_conn.commit()
-      l_conn.close()
-      st.session_state["has_unsaved_changes"] = True
-      st.sidebar.success("Ученик добавлен в локальный буфер!")
-      st.rerun()
+      exists = cursor.fetchone()
+
+      if exists:
+        l_conn.close()
+        duplicate_error_dialog(
+            f"Ученик {clean_surname} {clean_name} (класс {clean_grade})"
+            " уже существует!"
+        )
+      else:
+        cursor.execute(
+            "INSERT INTO students (name, surname, grade) VALUES (?, ?, ?)",
+            (clean_name, clean_surname, clean_grade),
+        )
+        l_conn.commit()
+        l_conn.close()
+        st.session_state["has_unsaved_changes"] = True
+        st.sidebar.success("Ученик добавлен в локальный буфер!")
+        st.rerun()
     else:
       st.sidebar.error("Заполните все поля!")
 
@@ -489,6 +514,15 @@ def build_emoji_string(stat, paid, hw):
   hw_emoji = "📘" if (hw and hw.strip()) else "📕"
   return f"{p_emoji} {pay_emoji} {hw_emoji}"
 
+@st.dialog("⚠️ Ошибка: Дубликат ученика")
+def duplicate_error_dialog(error_message):
+  st.error(error_message)
+  st.write(
+      "Нельзя создать или изменить ученика так, чтобы его данные полностью"
+      " совпадали с другим учеником."
+  )
+  if st.button("Понятно", type="primary", use_container_width=True):
+    st.rerun()
 
 @st.dialog("🗑️ Подтверждение удаления")
 def delete_student_dialog(student_id, student_fullname):
@@ -744,7 +778,7 @@ if all_student_dict and start_date <= end_date:
           with st.form(f"edit_form_{selected_sid}"):
             new_name = st.text_input("Имя", value=s_data["name"])
             new_surname = st.text_input("Фамилия", value=s_data["surname"])
-            new_grade = st.text_input("Class", value=s_data["grade"])
+            new_grade = st.text_input("Класс", value=s_data["grade"])
 
             c1, c2 = st.columns(2)
             with c1:
@@ -754,23 +788,44 @@ if all_student_dict and start_date <= end_date:
                     and new_surname.strip()
                     and new_grade.strip()
                 ):
+                  clean_name = capitalize_name(new_name)
+                  clean_surname = capitalize_name(new_surname)
+                  clean_grade = new_grade.strip()
+
                   l_conn = get_local_connection()
                   cursor = l_conn.cursor()
+
+                  # Проверяем, нет ли ДРУГОГО ученика с такими же данными
                   cursor.execute(
-                      "UPDATE students SET name = ?, surname = ?, grade = ? WHERE id = ?",
-                      (
-                          new_name.strip(),
-                          new_surname.strip(),
-                          new_grade.strip(),
-                          selected_sid,
-                      ),
+                      "SELECT id FROM students WHERE name = ? AND surname = ?"
+                      " AND grade = ? AND id != ?",
+                      (clean_name, clean_surname, clean_grade, selected_sid),
                   )
-                  l_conn.commit()
-                  l_conn.close()
-                  st.session_state["has_unsaved_changes"] = True
-                  st.session_state[edit_mode_key] = False
-                  st.success("Обновлено!")
-                  st.rerun()
+                  conflict = cursor.fetchone()
+
+                  if conflict:
+                    l_conn.close()
+                    duplicate_error_dialog(
+                        f"Ученик {clean_surname} {clean_name} (класс"
+                        f" {clean_grade}) уже существует в базе!"
+                    )
+                  else:
+                    cursor.execute(
+                        "UPDATE students SET name = ?, surname = ?, grade = ?"
+                        " WHERE id = ?",
+                        (
+                            clean_name,
+                            clean_surname,
+                            clean_grade,
+                            selected_sid,
+                        ),
+                    )
+                    l_conn.commit()
+                    l_conn.close()
+                    st.session_state["has_unsaved_changes"] = True
+                    st.session_state[edit_mode_key] = False
+                    st.success("Обновлено!")
+                    st.rerun()
             with c2:
               if st.form_submit_button("❌ Отмена"):
                 st.session_state[edit_mode_key] = False
