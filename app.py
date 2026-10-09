@@ -39,6 +39,27 @@ st.markdown(
 
 LOCAL_DB = "local_tutor.db"
 
+# Словарь для перевода дней недели на русский
+RUS_WEEKDAYS = {
+    "Mon": "ПН",
+    "Tue": "ВТ",
+    "Wed": "СР",
+    "Thu": "ЧТ",
+    "Fri": "ПТ",
+    "Sat": "СБ",
+    "Sun": "ВС",
+}
+
+
+def format_date_with_weekday(d_str_or_date):
+  if isinstance(d_str_or_date, str):
+    dt = pd.to_datetime(d_str_or_date)
+  else:
+    dt = pd.to_datetime(d_str_or_date)
+  day_num = dt.strftime("%d.%m")
+  eng_weekday = dt.strftime("%a")
+  rus_weekday = RUS_WEEKDAYS.get(eng_weekday, "")
+  return f"{day_num} {rus_weekday}"
 
 # --- Подключения (Безопасный вариант без утечки паролей) ---
 def get_supabase_connection():
@@ -321,13 +342,13 @@ def generate_excel_report(start_d, end_d, grade_filter, all_st, local_att):
         f" [{s['grade']}]" if s["grade"] and s["grade"] != "-" else ""
     )
     table_data[full_name] = {
-        pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
+        format_date_with_weekday(d): "" for d in date_range
     }
 
     for d_str in date_range:
       att = local_att.get((s["id"], d_str))
       if att and att["lesson_exists"] == 1:
-        fmt_d = pd.to_datetime(d_str).strftime("%d.%m")
+        fmt_d = format_date_with_weekday(d_str)
 
         l_conn_rep = get_local_connection()
         cursor_rep = l_conn_rep.cursor()
@@ -541,13 +562,13 @@ if all_student_dict and start_date <= end_date:
         f" [{s['grade']}]" if s["grade"] and s["grade"] != "-" else ""
     )
     table_data[full_name] = {
-        pd.to_datetime(d).strftime("%d.%m"): "" for d in date_range
+        format_date_with_weekday(d): "" for d in date_range
     }
 
     for d_str in date_range:
       att = local_attendance.get((s["id"], d_str))
       if att and att["lesson_exists"] == 1:
-        fmt_d = pd.to_datetime(d_str).strftime("%d.%m")
+        fmt_d = format_date_with_weekday(d_str)
         if fmt_d in table_data[full_name]:
           table_data[full_name][fmt_d] = build_emoji_string(
               att["status"], att["paid"], att["homework"]
