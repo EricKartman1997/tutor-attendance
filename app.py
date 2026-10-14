@@ -9,7 +9,7 @@ import streamlit as st
 
 # --- Настройка страницы ---
 st.set_page_config(
-    page_title="Для моего Солнышка", page_icon="📚", layout="wide"
+    page_title="Журнал репетитора", page_icon="📚", layout="wide"
 )
 
 # --- Авторизация ---
